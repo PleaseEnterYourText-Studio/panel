@@ -124,6 +124,20 @@ export async function listDueTargetsBatch(db: D1Database, ids: string[]): Promis
   return results;
 }
 
+// 调度器重建状态机用：返回「新 → 旧」的最近 n 条结果（只取 ok，不取明细）。
+// ORDER BY 里带 id 是为了 at 相同（同毫秒）时顺序稳定，折叠结果可复现。
+export async function listRecentChecks(
+  db: D1Database,
+  targetId: string,
+  limit: number,
+): Promise<{ ok: number }[]> {
+  const { results } = await db
+    .prepare(`SELECT ok FROM checks_raw WHERE target_id = ? ORDER BY at DESC, id DESC LIMIT ?`)
+    .bind(targetId, limit)
+    .all<{ ok: number }>();
+  return results;
+}
+
 export async function advanceTarget(db: D1Database, id: string, nextRunAt: number): Promise<void> {
   await db.prepare(`UPDATE targets SET next_run_at = ? WHERE id = ?`).bind(nextRunAt, id).run();
 }

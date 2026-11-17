@@ -20,8 +20,10 @@ export interface Machine {
   okStreak: number;
 }
 
-const FAIL_THRESHOLD = 3;
-const OK_THRESHOLD = 2;
+// 导出阈值：调度器从历史重建状态机时需要用 FAIL_THRESHOLD 给「有未关闭 incident」
+// 的机器补一个饱和计数，不能把 3 抄成第二个魔数。
+export const FAIL_THRESHOLD = 3;
+export const OK_THRESHOLD = 2;
 
 export function initial(): Machine {
   return { state: 'unknown', failStreak: 0, okStreak: 0 };
