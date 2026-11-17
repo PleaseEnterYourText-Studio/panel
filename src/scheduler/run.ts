@@ -18,14 +18,13 @@
 import type { Env } from '../env';
 import {
   claimTargets,
-  closeIncident,
+  closeIncidentWithEvent,
   getOpenIncident,
   insertChecks,
-  insertIncident,
+  insertIncidentWithEvent,
   listDueTargets,
   listRecentChecks,
   upsertRollups,
-  writeEvent,
   type CheckRow,
   type IncidentRow,
   type RollupUpsert,
@@ -158,29 +157,34 @@ async function applyTransition(env: Env, snapshot: TargetSnapshot): Promise<void
 
   if (next.state === 'down' && open === null) {
     const incidentId = crypto.randomUUID();
-    await insertIncident(env.DB, {
-      id: incidentId,
-      targetId: row.id,
-      openedAt: observation.at,
-      // 落库只允许 'down' / 'closed'；活跃与否一律用 closed_at IS NULL 判断。
-      state: 'down',
-      cause: observation.errorKind ?? null,
-    });
-    await writeEvent(env.DB, {
-      id: crypto.randomUUID(),
-      at: observation.at,
-      kind: 'incident.opened',
-      actor: null,
-      assetId: row.asset_id,
-      payload: JSON.stringify({ incidentId, errorKind: observation.errorKind ?? null }),
-      ip: null,
-    });
+    // incident 行与 incident.opened 事件在同一条 db.batch（事务）里写：
+    // 只成功一半的 incident 会永久缺失事件流，P0 验收的「事件流两条记录」就不成立。
+    // 部分唯一索引 idx_incidents_one_open 兜住并发 tick 的重复开单，重复时事件不写。
+    await insertIncidentWithEvent(
+      env.DB,
+      {
+        id: incidentId,
+        targetId: row.id,
+        openedAt: observation.at,
+        // 落库只允许 'down' / 'closed'；活跃与否一律用 closed_at IS NULL 判断。
+        state: 'down',
+        cause: observation.errorKind ?? null,
+      },
+      {
+        id: crypto.randomUUID(),
+        at: observation.at,
+        kind: 'incident.opened',
+        actor: null,
+        assetId: row.asset_id,
+        payload: JSON.stringify({ incidentId, errorKind: observation.errorKind ?? null }),
+        ip: null,
+      },
+    );
     return;
   }
 
   if (next.state === 'ok' && open !== null) {
-    await closeIncident(env.DB, open.id, observation.at);
-    await writeEvent(env.DB, {
+    await closeIncidentWithEvent(env.DB, open.id, observation.at, {
       id: crypto.randomUUID(),
       at: observation.at,
       kind: 'incident.closed',

@@ -7,13 +7,14 @@
 // 审计时间戳因此必然 <= 探测发起的时刻。
 //
 // 探测本身通过 runTick 复用调度器（claim-first / 落库 / 状态机都是同一套），不另写一遍。
+// audit / probe 都是可注入依赖：审计失败分支与探测 stub 要在测试里能确定性复现。
 // 返回 probed/skipped/failed 而不是单个 observation：runTick 是分片语义，手动触发时该
 // target 是唯一到期项，probed=1 即成功；跳过（P0 未实现的 source）也如实计入 skipped。
 
 import { Hono } from 'hono';
 import type { Env } from '../env';
 import type { Vars } from '../auth/rbac';
-import { audit } from '../audit';
+import { audit, type AuditInput } from '../audit';
 import { runTick, type TickDeps, type TickResult } from '../scheduler/run';
 import { currentIdentity, gate } from './guard';
 
@@ -28,7 +29,14 @@ interface TargetRef {
   asset_enabled: number;
 }
 
-export type ProbesApiDeps = TickDeps;
+/** 审计写入口。抽成依赖是为了能注入「抛错」的审计，锁住「审计失败不执行动作」这条。 */
+export type AuditFn = (env: Env, input: AuditInput) => Promise<void>;
+
+export interface ProbesApiDeps {
+  probe: TickDeps;
+  /** 默认是生产 audit；测试注入抛错实现验证失败分支。 */
+  audit: AuditFn;
+}
 
 export function createProbesApi(deps: ProbesApiDeps): Hono<{ Bindings: Env; Variables: Vars }> {
   const api = new Hono<{ Bindings: Env; Variables: Vars }>();
@@ -55,7 +63,7 @@ export function createProbesApi(deps: ProbesApiDeps): Hono<{ Bindings: Env; Vari
 
     // 1) 无审计不执行：审计失败直接 500，动作不执行。
     try {
-      await audit(c.env, {
+      await deps.audit(c.env, {
         actor: identity.email,
         action: 'probe.run',
         assetId: target.asset_id,
@@ -69,7 +77,7 @@ export function createProbesApi(deps: ProbesApiDeps): Hono<{ Bindings: Env; Vari
 
     // 2) 动作：把该 target 拨回到期，交给调度器跑一个 tick。
     await c.env.DB.prepare(`UPDATE targets SET next_run_at = 0 WHERE id = ?`).bind(targetId).run();
-    const result = await runTick(c.env, deps);
+    const result = await runTick(c.env, deps.probe);
 
     return c.json({ targetId, ...result } satisfies RunProbeResponse);
   });

@@ -1,5 +1,4 @@
-// D1 查询层：所有 SQL 均为 prepared statement，值只经 bind() 传入。
-// 唯一允许的拼接是 listDueTargetsBatch 的 `?` 占位符序列（不拼值）。
+// D1 查询层：所有 SQL 均为 prepared statement，值只经 bind() 传入，不拼字符串。
 
 export interface AssetRow {
   id: string;
@@ -121,16 +120,6 @@ export async function listDueTargets(db: D1Database, now: number, limit: number)
   return results;
 }
 
-export async function listDueTargetsBatch(db: D1Database, ids: string[]): Promise<TargetRow[]> {
-  if (ids.length === 0) return [];
-  const placeholders = ids.map(() => '?').join(',');
-  const { results } = await db
-    .prepare(`SELECT * FROM targets WHERE id IN (${placeholders})`)
-    .bind(...ids)
-    .all<TargetRow>();
-  return results;
-}
-
 // 调度器重建状态机用：返回「新 → 旧」的最近 n 条结果（只取 ok，不取明细）。
 // ORDER BY 里带 id 是为了 at 相同（同毫秒）时顺序稳定，折叠结果可复现。
 export async function listRecentChecks(
@@ -143,10 +132,6 @@ export async function listRecentChecks(
     .bind(targetId, limit)
     .all<{ ok: number }>();
   return results;
-}
-
-export async function advanceTarget(db: D1Database, id: string, nextRunAt: number): Promise<void> {
-  await db.prepare(`UPDATE targets SET next_run_at = ? WHERE id = ?`).bind(nextRunAt, id).run();
 }
 
 export interface TargetClaim {
@@ -242,20 +227,102 @@ export async function getOpenIncident(db: D1Database, targetId: string): Promise
     .first<IncidentRow>();
 }
 
-export async function insertIncident(
-  db: D1Database,
-  i: { id: string; targetId: string; openedAt: number; state: string; cause: string | null },
-): Promise<void> {
-  await db
+export interface NewIncident {
+  id: string;
+  targetId: string;
+  openedAt: number;
+  state: string;
+  cause: string | null;
+}
+
+export interface NewEvent {
+  id: string;
+  at: number;
+  kind: string;
+  actor: string | null;
+  assetId: string | null;
+  payload: string | null;
+  ip: string | null;
+}
+
+// 并发兜底：迁移 0002 建了部分唯一索引 idx_incidents_one_open（target_id where closed_at
+// is null）。两个 tick 同时判定 down 时，后到的那条 INSERT 不会报错，被静默忽略。
+// 返回「这次到底有没有真的插进去」，调用方据此决定要不要写 incident.opened。
+export async function insertIncident(db: D1Database, i: NewIncident): Promise<boolean> {
+  const result = await db
     .prepare(
-      `INSERT INTO incidents (id, target_id, opened_at, closed_at, state, cause) VALUES (?, ?, ?, NULL, ?, ?)`,
+      `INSERT INTO incidents (id, target_id, opened_at, closed_at, state, cause)
+       VALUES (?, ?, ?, NULL, ?, ?)
+       ON CONFLICT DO NOTHING`,
     )
     .bind(i.id, i.targetId, i.openedAt, i.state, i.cause)
     .run();
+  return (result.meta.changes ?? 0) > 0;
 }
 
-export async function closeIncident(db: D1Database, id: string, at: number): Promise<void> {
-  await db.prepare(`UPDATE incidents SET closed_at = ?, state = 'closed' WHERE id = ?`).bind(at, id).run();
+// 插入 incident + 写 incident.opened 事件，一次 db.batch（D1 batch 是事务）：
+// 任一语句失败整批回滚，不会出现「incident 存在但事件永久缺失」的半写状态。
+//
+// 事件语句用 `WHERE EXISTS (SELECT 1 FROM incidents WHERE id = ?)` 守卫：同一条 batch
+// 内先插 incident，事件只在「本行真的存在」时写入 —— 也就是 ON CONFLICT DO NOTHING
+// 生效（并发 tick 已经开过一条 open incident）时不写重复事件。
+// 插入后重新读一次 open incident，以数据库现状为准（可能是本次插的，也可能是并发那条）。
+export async function insertIncidentWithEvent(
+  db: D1Database,
+  i: NewIncident,
+  e: NewEvent,
+): Promise<{ inserted: boolean; open: IncidentRow | null }> {
+  const [incidentResult] = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO incidents (id, target_id, opened_at, closed_at, state, cause)
+         VALUES (?, ?, ?, NULL, ?, ?)
+         ON CONFLICT DO NOTHING`,
+      )
+      .bind(i.id, i.targetId, i.openedAt, i.state, i.cause),
+    db
+      .prepare(
+        `INSERT INTO events (id, at, kind, actor, asset_id, payload, ip)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM incidents WHERE id = ?)`,
+      )
+      .bind(e.id, e.at, e.kind, e.actor, e.assetId, e.payload, e.ip, i.id),
+  ]);
+
+  return {
+    inserted: (incidentResult?.meta.changes ?? 0) > 0,
+    open: await getOpenIncident(db, i.targetId),
+  };
+}
+
+// 关闭 incident + 写 incident.closed 事件，同样一次 batch 原子写。
+// 事件语句带 `AND closed_at = ? AND state = 'closed'` 守卫：只有当这条 batch 里的
+// UPDATE 真的把它关掉（而不是并发已经关过）时才写事件。
+// 事件 id 由 incident 派生（一条 incident 只可能关闭一次）：即使两次 close 落在同一
+// 毫秒，第二次也只撞主键被 ON CONFLICT DO NOTHING 吞掉，不会产出重复事件。
+export async function closeIncidentWithEvent(
+  db: D1Database,
+  id: string,
+  at: number,
+  e: NewEvent,
+): Promise<boolean> {
+  const eventId = `incident.closed:${id}`;
+  const [closeResult] = await db.batch([
+    db
+      .prepare(`UPDATE incidents SET closed_at = ?, state = 'closed' WHERE id = ? AND closed_at IS NULL`)
+      .bind(at, id),
+    db
+      .prepare(
+        `INSERT INTO events (id, at, kind, actor, asset_id, payload, ip)
+         SELECT ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM incidents WHERE id = ? AND closed_at = ? AND state = 'closed'
+          )
+         ON CONFLICT DO NOTHING`,
+      )
+      .bind(eventId, e.at, e.kind, e.actor, e.assetId, e.payload, e.ip, id, at),
+  ]);
+  return (closeResult?.meta.changes ?? 0) > 0;
 }
 
 export async function writeEvent(
