@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types",
+      "vitest/globals"
+    ],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": [
+    "src",
+    "web",
+    "tests",
+    "vite.config.ts",
+    "vitest.config.ts"
+  ]
+}

@@ -1,0 +1,351 @@
+/* PEYT Panel 设计令牌。规格 §10.5：取值固定，组件一律引用变量，不硬编码颜色。 */
+
+:root {
+  /* 画布 / 面板 / 浮层 */
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #21262d;
+  /* 边框 */
+  --border: #30363d;
+  /* 正文 / 弱化 / 强调 */
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --bright: #f0f6fc;
+  /* 链接与焦点 */
+  --accent: #58a6ff;
+  /* 正常 / 疑似 / 故障 */
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  /* 异常行整行底色（故障红在 panel 上的低饱和版本） */
+  --row-danger: #1a0f10;
+  /* 主按钮 */
+  --primary: #238636;
+
+  /* 字阶：信息密度优先于留白 */
+  --fs-body: 12px;
+  --fs-table: 11px;
+  --fs-page: 15px;
+  --fs-section: 13px;
+  --fs-meta: 10px;
+  --row: 28px;
+
+  --radius: 6px;
+  --font: -apple-system, 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+h1 {
+  font-size: var(--fs-page);
+  font-weight: 600;
+  color: var(--bright);
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: var(--fs-table);
+}
+
+/* 骨架：40px 顶栏 + 左栏 + 内容区 */
+.shell {
+  display: grid;
+  grid-template-rows: 40px 1fr;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar .brand {
+  color: var(--bright);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.topbar .search {
+  margin-left: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: var(--fs-table);
+  padding: 3px 8px;
+  width: 260px;
+}
+
+.topbar .search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.topbar .user {
+  color: var(--muted);
+}
+
+.body {
+  display: flex;
+  min-height: 0;
+}
+
+.rail {
+  width: 158px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  padding: 10px 0;
+  overflow-y: auto;
+}
+
+.rail .k {
+  padding: 3px 14px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.rail .k:first-child {
+  margin-top: 0;
+}
+
+.rail a {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 14px;
+  color: var(--text);
+  border-left: 2px solid transparent;
+}
+
+.rail a:hover {
+  background: var(--panel);
+  text-decoration: none;
+}
+
+.rail a.on {
+  border-left-color: #f78166;
+  background: var(--panel);
+  color: var(--bright);
+  font-weight: 600;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+/* 卡片与表格：表格行固定 28px，一屏尽量多行 */
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.card > .h {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  /* 规格 §10.5：区块标题 13px，与表格 11px 拉开层级。 */
+  font-size: var(--fs-section);
+  background: var(--panel-2);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+.card > .r {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: var(--row);
+  height: var(--row);
+  padding: 0 10px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-table);
+}
+
+/* 卡片的第一个内容行不要上边框。有 .h 头部时首个 .r 不是 first-child，
+   所以必须用相邻兄弟选择器；原来的 :first-child 版本在有 .h 时永不命中，是双线来源。 */
+.card > .h + .r {
+  border-top: none;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  height: var(--row);
+  padding: 0 10px;
+  text-align: left;
+  font-size: var(--fs-table);
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* 按钮：默认次级，.danger 危险，.primary 主操作 */
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 3px 9px;
+  font-size: var(--fs-table);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn.danger {
+  background: #3d1418;
+  border-color: #6e252b;
+  color: #ff9c94;
+}
+
+.btn.primary {
+  background: var(--primary);
+  border-color: #2ea043;
+  color: #fff;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #2ea043;
+}
+
+.pill {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 1px 7px;
+  font-size: var(--fs-meta);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+.tabs {
+  display: flex;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+/* 标签页同时支持 <a> 与 <button>：详情页用按钮切本地状态，不整页跳转。 */
+.tabs a,
+.tabs button {
+  padding: 7px 0;
+  color: var(--muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font-family: inherit;
+  font-size: var(--fs-body);
+  cursor: pointer;
+}
+
+.tabs a:hover,
+.tabs button:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.tabs a.on,
+.tabs button.on {
+  color: var(--bright);
+  border-bottom-color: #f78166;
+  font-weight: 600;
+}
+
+/* 详情页两列：主列自适应，右栏固定 260px；窄屏塌成单列。 */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 12px;
+  align-items: start;
+}
+
+.split > .main-col,
+.split > .side-col {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 右栏描述列表：左 label 右值，值过长时省略并保留 title。 */
+.kv {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 10px;
+  font-size: var(--fs-table);
+}
+
+.kv .k {
+  color: var(--muted);
+}
+
+.kv .v {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

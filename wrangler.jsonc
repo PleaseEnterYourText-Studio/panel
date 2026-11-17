@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "peyt-panel",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "./dist/web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "peyt-panel", "database_id": "REPLACE_ME", "migrations_dir": "migrations" }
+  ],
+  "kv_namespaces": [{ "binding": "KV", "id": "REPLACE_ME" }],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": { "enabled": true }
+}
