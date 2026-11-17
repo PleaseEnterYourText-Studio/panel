@@ -1,0 +1,5 @@
+# 本地开发 secrets（示例，复制为 .dev.vars 后填写真实值）
+ENCRYPTION_KEY="dev-0123456789abcdef0123456789abcdef"
+ACCESS_TEAM_DOMAIN="https://your-team.cloudflareaccess.com"
+ACCESS_AUD="your-access-application-aud"
+DEV_BYPASS_EMAIL="you@example.com"
