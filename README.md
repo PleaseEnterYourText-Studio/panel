@@ -2,6 +2,21 @@
 
 Cloudflare Workers 上的服务器 / 服务管理面板。
 
+## 快速开始
+
+**线上部署（D1 / KV / Access / 迁移 / 首个 owner / 自检）看 [`docs/deploy.md`](docs/deploy.md)。**
+那份文档是给运维照抄的，包含全部命令的顺序；本文件只讲本地开发与仓库约定。
+
+本地开发最短路径：
+
+```bash
+pnpm install
+cp .dev.vars.example .dev.vars     # 填本地 secrets
+pnpm db:migrate:local              # 初始化本地 D1
+pnpm exec wrangler dev             # 终端 A：Worker + 本地 D1/KV，:8787
+pnpm dev                           # 终端 B：Vite 前端，/api 代理到 :8787
+```
+
 ## 开发
 
 需要 Node 22.12+ 与 pnpm 10。
@@ -41,4 +56,8 @@ TODO(migrate): @cloudflare/vitest-pool-workers → @cloudflare/vitest-plugin
 
 ## 部署前
 
-`wrangler.jsonc` 里的 `database_id` 与 KV `id` 目前是 `REPLACE_ME` 占位。创建 D1 / KV 后替换为真实 ID，再执行 `pnpm deploy`。
+`wrangler.jsonc` 里的 `database_id` 与 KV `id` 目前是 `REPLACE_ME` 占位。创建 D1 / KV 后替换为真实 ID，再执行 `pnpm deploy`。完整步骤见 [`docs/deploy.md`](docs/deploy.md)。
+
+## 许可证
+
+本项目以 **AGPL-3.0** 发布，全文见 [`LICENSE`](LICENSE)。修改后以网络服务形式对外提供，同样需要按 AGPL-3.0 提供完整源码。
