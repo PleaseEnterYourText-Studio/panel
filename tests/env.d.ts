@@ -9,6 +9,7 @@ declare namespace Cloudflare {
     ENCRYPTION_KEY: string;
     ACCESS_TEAM_DOMAIN: string;
     ACCESS_AUD: string;
+    PANEL_ENV?: string;
     DEV_BYPASS_EMAIL?: string;
     TEST_MIGRATIONS: { name: string; queries: string[] }[];
   }

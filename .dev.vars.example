@@ -2,4 +2,6 @@
 ENCRYPTION_KEY="dev-0123456789abcdef0123456789abcdef"
 ACCESS_TEAM_DOMAIN="https://your-team.cloudflareaccess.com"
 ACCESS_AUD="your-access-application-aud"
+# 只有 PANEL_ENV=development 时 DEV_BYPASS_EMAIL 才会生效；生产不要设这两项。
+PANEL_ENV="development"
 DEV_BYPASS_EMAIL="you@example.com"

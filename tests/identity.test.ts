@@ -88,11 +88,35 @@ describe('getIdentity', () => {
     await expect(getIdentity(req, env)).resolves.toBeNull();
   });
 
-  it('resolves the dev bypass identity only when DEV_BYPASS_EMAIL is bound', async () => {
+  it('resolves the dev bypass identity only when PANEL_ENV=development and DEV_BYPASS_EMAIL are both bound', async () => {
     const req = new Request('https://panel.test/api/services');
-    const localEnv = { ...env, DEV_BYPASS_EMAIL: 'dev@peyt.studio' } as Env;
+    const localEnv = {
+      ...env,
+      PANEL_ENV: 'development',
+      DEV_BYPASS_EMAIL: 'dev@peyt.studio',
+    } as Env;
 
     await expect(getIdentity(req, localEnv)).resolves.toEqual({ email: 'dev@peyt.studio', role: 'owner' });
+  });
+
+  // B1 回归保护：生产里绑定 DEV_BYPASS_EMAIL 不能变成匿名 owner。token 缺失时必须 401 等价。
+  it('ignores DEV_BYPASS_EMAIL when PANEL_ENV is production', async () => {
+    const req = new Request('https://panel.test/api/services');
+    const productionEnv = {
+      ...env,
+      PANEL_ENV: 'production',
+      DEV_BYPASS_EMAIL: 'attacker@peyt.studio',
+    } as Env;
+
+    await expect(getIdentity(req, productionEnv)).resolves.toBeNull();
+  });
+
+  it('ignores DEV_BYPASS_EMAIL when PANEL_ENV is unset', async () => {
+    const req = new Request('https://panel.test/api/services');
+    const noPanelEnv = { ...env, DEV_BYPASS_EMAIL: 'attacker@peyt.studio' } as Env;
+    delete (noPanelEnv as { PANEL_ENV?: string }).PANEL_ENV;
+
+    await expect(getIdentity(req, noPanelEnv)).resolves.toBeNull();
   });
 });
 
@@ -172,5 +196,7 @@ describe('production config guard', () => {
 
   it('keeps the dev bypass documented in .dev.vars.example only', () => {
     expect(devVarsExample).toContain('DEV_BYPASS_EMAIL');
+    // 双条件闸门：示例里必须同时给出 PANEL_ENV=development，否则照抄示例的人会被 bypass 忽略。
+    expect(devVarsExample).toContain('PANEL_ENV="development"');
   });
 });

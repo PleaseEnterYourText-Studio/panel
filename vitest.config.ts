@@ -23,6 +23,8 @@ export default defineConfig({
           ACCESS_TEAM_DOMAIN: 'https://test.cloudflareaccess.com',
           ACCESS_AUD: 'test-aud',
           ENCRYPTION_KEY: 'test-key-0123456789abcdef0123456789',
+          // bypass 的双条件闸门默认只开环境位；DEV_BYPASS_EMAIL 由需要它的用例显式传。
+          PANEL_ENV: 'development',
           TEST_MIGRATIONS: testMigrations,
         },
       },

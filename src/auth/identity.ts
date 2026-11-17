@@ -66,10 +66,14 @@ export async function resolveIdentity(email: string, env: Env): Promise<Identity
 }
 
 export async function getIdentity(req: Request, env: Env): Promise<Identity | null> {
-  // DEV_BYPASS_EMAIL 只允许来自本地 .dev.vars（tests/identity.test.ts 有守卫断言
-  // wrangler.jsonc 不含该字符串），生产环境永远不该有这条绑定。
-  const devEmail = env.DEV_BYPASS_EMAIL?.trim().toLowerCase();
-  if (devEmail) return { email: devEmail, role: 'owner' };
+  // bypass 是双条件闸门：PANEL_ENV === 'development' 且 DEV_BYPASS_EMAIL 非空。
+  // 只看变量是否存在等于「生产里加一个变量就拿到 owner」——secret / dashboard 变量 /
+  // 遗留 .dev.vars 都能触发。PANEL_ENV 未设或不是 development 时完全忽略该变量，
+  // 继续走正常 JWT 路径（即使 DEV_BYPASS_EMAIL 被错误绑上了也不放行）。
+  if (env.PANEL_ENV === 'development') {
+    const devEmail = env.DEV_BYPASS_EMAIL?.trim().toLowerCase();
+    if (devEmail) return { email: devEmail, role: 'owner' };
+  }
 
   const token = req.headers.get('Cf-Access-Jwt-Assertion');
   if (!token) return null;
