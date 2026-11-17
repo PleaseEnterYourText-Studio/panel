@@ -1,5 +1,23 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { defineConfig } from 'vitest/config';
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
+
+// vitest-pool-workers 不会自动应用 migrations/，测试进程在 Node 里把 SQL 读成
+// applyD1Migrations 需要的 { name, queries } 结构，通过 binding 注入 worker。
+// 注意：sql.split(';') 只适用于本仓库的迁移（不含字符串字面量里的分号）。
+const migrationsDir = fileURLToPath(new URL('./migrations', import.meta.url));
+const testMigrations = readdirSync(migrationsDir)
+  .filter((file) => file.endsWith('.sql'))
+  .sort()
+  .map((name) => ({
+    name,
+    queries: readFileSync(join(migrationsDir, name), 'utf8')
+      .split(';')
+      .map((query) => query.trim())
+      .filter((query) => query.length > 0),
+  }));
 
 export default defineConfig({
   plugins: [
@@ -18,8 +36,12 @@ export default defineConfig({
           ACCESS_TEAM_DOMAIN: 'https://test.cloudflareaccess.com',
           ACCESS_AUD: 'test-aud',
           ENCRYPTION_KEY: 'test-key-0123456789abcdef0123456789',
+          TEST_MIGRATIONS: testMigrations,
         },
       },
     }),
   ],
+  test: {
+    setupFiles: ['tests/setup.ts'],
+  },
 });
