@@ -30,5 +30,8 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ['tests/setup.ts'],
+    // Vitest 默认把 CSS 模块替换成空串（css: false），连 `?raw` 也变成 ''，
+    // tests/ui-shell.test.ts 需要读 tokens.css 原文，所以打开 CSS 处理。
+    css: true,
   },
 });
