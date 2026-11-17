@@ -67,6 +67,11 @@ describe('Overview 页契约', () => {
     expect(overviewSource).toContain('href="/services"');
   });
 
+  it('always shows the write estimate, not only above the warning line', () => {
+    expect(overviewSource).toContain('每日写入估算');
+    expect(overviewSource).toContain('writeEstimate');
+  });
+
   it('shows the real error status instead of swallowing it', () => {
     expect(overviewSource).toContain('describeError');
     expect(overviewSource).toContain('ApiError');
@@ -128,6 +133,58 @@ describe('部署文档', () => {
     expect(deployDoc).toContain('180');
     expect(deployDoc).toContain('100,000');
   });
+
+  // Important 1：wrangler secret put 在 Worker 不存在时 404，必须排在首次 deploy 之后。
+  it('puts the secret only after the worker exists', () => {
+    const firstDeploy = deployDoc.indexOf('\npnpm deploy\n');
+    const secretAt = deployDoc.indexOf('\npnpm exec wrangler secret put ENCRYPTION_KEY\n');
+    expect(firstDeploy).toBeGreaterThan(0);
+    expect(secretAt).toBeGreaterThan(firstDeploy);
+  });
+
+  // Important 2：域名 → Access → vars → 二次部署 的可执行链路。
+  it('orders domain binding and Access before the redeploy that carries the vars', () => {
+    const domainAt = deployDoc.indexOf('Custom domain');
+    const accessAt = deployDoc.indexOf('Self-hosted');
+    const varsAt = deployDoc.indexOf('"ACCESS_TEAM_DOMAIN"');
+    const redeployAt = deployDoc.indexOf('## 8.');
+    expect(domainAt).toBeGreaterThan(0);
+    expect(accessAt).toBeGreaterThan(domainAt);
+    expect(varsAt).toBeGreaterThan(accessAt);
+    expect(redeployAt).toBeGreaterThan(varsAt);
+    expect(deployDoc).toContain('"vars"');
+  });
+
+  // Important 3：/api/health 匿名 curl 只在 Access 有 Bypass 时成立；两处说法一致。
+  it('explains the Access bypass and the service-token fallback for /api/health', () => {
+    expect(deployDoc).toContain('Bypass');
+    expect(deployDoc).toContain('api/health');
+    expect(deployDoc).toContain('CF-Access-Client-Id');
+    expect(deployDoc).toContain('CF-Access-Client-Secret');
+  });
+
+  // Minor：workers.dev 不属于自己的 zone，建不出合法 Access 应用。
+  it('warns against the workers.dev Access fallback and tells you to disable the route', () => {
+    expect(deployDoc).toContain('不要用 `*.workers.dev` 域名建 Access 应用');
+    expect(deployDoc).not.toContain('或用 `*.workers.dev` 那条域名');
+    expect(deployDoc).toContain('workers_dev');
+    expect(deployDoc).toContain('关闭 `workers.dev` 路由');
+  });
+
+  // Minor：预算按自然日，不是工作日。
+  it('states a daily budget, not a working-day budget', () => {
+    expect(deployDoc).toContain('含周末');
+    expect(deployDoc).not.toContain('每个工作日');
+    expect(deployDoc).not.toContain('每工作日');
+  });
+
+  // Minor：公式是 floor(Σ ...)，且换算数字对（180s ≈ 480 行/target，208 顶满、167 预警）。
+  it('states the write estimate as floor of the sum with correct target counts', () => {
+    expect(deployDoc).toContain('floor(Σ 86400 / interval_sec)');
+    expect(deployDoc).toContain('480');
+    expect(deployDoc).toContain('208');
+    expect(deployDoc).toContain('167');
+  });
 });
 
 describe('README 快速开始', () => {
@@ -163,5 +220,22 @@ describe('仓库文件检查', () => {
     expect(wranglerConfig).toContain('"binding": "DB"');
     expect(wranglerConfig).toContain('"binding": "KV"');
     expect(wranglerConfig).toContain('"crons"');
+  });
+});
+
+// 审阅修复（docs/deploy.md）：这些事实错误会直接卡住照抄的人，钉死在测试里。
+describe('部署文档事实修正', () => {
+  it('does not claim ENCRYPTION_KEY is used in P0', () => {
+    expect(deployDoc).toContain('只声明、尚未使用');
+    expect(deployDoc).not.toContain('用于审计');
+  });
+
+  it('explains why the first deploy comes before the secret', () => {
+    expect(deployDoc).toContain('## 为什么是这个顺序');
+    expect(deployDoc).toContain('要求 Worker 已经存在');
+  });
+
+  it('warns that the first deploy is unprotected', () => {
+    expect(deployDoc).toContain('此时面板没有任何身份保护');
   });
 });

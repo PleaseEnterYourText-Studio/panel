@@ -126,6 +126,7 @@ export function Overview() {
       <h1 style={{ fontSize: 20, fontWeight: 600, margin: '4px 0 4px' }}>{headline}</h1>
       <div style={{ color: 'var(--muted)', marginBottom: 14, fontSize: 'var(--fs-table)' }}>
         {data.okCount} 正常 · {data.downCount} 故障 · {data.suspectCount} 疑似 · {data.unknownCount} 无数据 · 最近巡检 {tick}
+        {' · '}每日写入估算 {data.writeEstimate.toLocaleString('en-US')} 行
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
