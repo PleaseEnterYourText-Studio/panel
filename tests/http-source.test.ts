@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { probeHttp } from '../src/sources/http';
+import { ConfigError, probeHttp, readExpectStatus } from '../src/sources/http';
 import { resolveSource, UnsupportedSourceError } from '../src/sources/index';
 import type { Target } from '../src/domain/observation';
 
@@ -98,3 +98,31 @@ describe('resolveSource', () => {
     expect(deps.fetch).not.toHaveBeenCalled();
   });
 });
+
+
+// B2：config 必须显式收窄。非法 expectStatus 是配置错误，不能落成失败观测；
+// 字段缺失才是合法的「用默认值」。
+describe('probeHttp config narrowing (B2)', () => {
+  it('defaults to [200] when expectStatus is absent', async () => {
+    expect(readExpectStatus({})).toEqual([200]);
+    const fakeFetch = vi.fn(async () => new Response('up', { status: 200 }));
+    const obs = await probeHttp(target({}), { fetch: fakeFetch as unknown as typeof fetch, now: () => 1 });
+    expect(obs.ok).toBe(true);
+  });
+
+  it('throws ConfigError for expectStatus that is not an array, without fetching', async () => {
+    const fakeFetch = vi.fn(async () => new Response('up', { status: 200 }));
+    await expect(
+      probeHttp(target({ expectStatus: 200 }), { fetch: fakeFetch as unknown as typeof fetch, now: () => 1 }),
+    ).rejects.toBeInstanceOf(ConfigError);
+    expect(fakeFetch).not.toHaveBeenCalled();
+  });
+
+  it('throws ConfigError for an empty array or non-integer entries', () => {
+    expect(() => readExpectStatus({ expectStatus: [] })).toThrow(ConfigError);
+    expect(() => readExpectStatus({ expectStatus: [200, '204'] })).toThrow(ConfigError);
+    expect(() => readExpectStatus({ expectStatus: [200.5] })).toThrow(ConfigError);
+    expect(readExpectStatus({ expectStatus: [200, 204] })).toEqual([200, 204]);
+  });
+});
+

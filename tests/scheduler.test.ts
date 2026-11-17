@@ -26,6 +26,10 @@ interface SeedTargetOptions {
   nextRunAt: number;
   source?: string;
   intervalSec?: number;
+  /** 原始 config 字符串（默认 '{}'）：B2 用例直接塞坏 JSON / 错误类型。 */
+  config?: string;
+  /** 所属 asset 的启用位：B3 用例验证停用 asset 下的 target 不再被探测器取到。 */
+  assetEnabled?: number;
 }
 
 async function seedTarget(opts: SeedTargetOptions): Promise<void> {
@@ -33,12 +37,12 @@ async function seedTarget(opts: SeedTargetOptions): Promise<void> {
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO assets (id, kind, name, slug, grp, owner_email, tags, repo, notes, enabled, created_at)
-       VALUES (?, 'service', ?, ?, 'prod', 'nowint@peyt.studio', NULL, NULL, NULL, 1, ?)`,
-    ).bind(assetId, assetId, assetId, T0),
+       VALUES (?, 'service', ?, ?, 'prod', 'nowint@peyt.studio', NULL, NULL, NULL, ?, ?)`,
+    ).bind(assetId, assetId, assetId, opts.assetEnabled ?? 1, T0),
     env.DB.prepare(
       `INSERT INTO targets (id, asset_id, source, form, config, interval_sec, timeout_ms, enabled, next_run_at)
-       VALUES (?, ?, ?, 'https://example.test/health', '{}', ?, 8000, 1, ?)`,
-    ).bind(opts.id, assetId, opts.source ?? 'http', opts.intervalSec ?? 180, opts.nextRunAt),
+       VALUES (?, ?, ?, 'https://example.test/health', ?, ?, 8000, 1, ?)`,
+    ).bind(opts.id, assetId, opts.source ?? 'http', opts.config ?? '{}', opts.intervalSec ?? 180, opts.nextRunAt),
   ]);
 }
 
@@ -183,6 +187,97 @@ describe('runTick probe pipeline', () => {
     expect(
       await count(`SELECT COUNT(*) AS n FROM incidents WHERE target_id = ? AND closed_at IS NULL`, 'st-flap'),
     ).toBe(0);
+  });
+
+  it('uses the default [200] when expectStatus is absent from config', async () => {
+    await disableAllTargets();
+    const base = nextBase();
+    // config='{}'：字段缺失是合法配置，按默认 [200] 正常探测（不是 skip，也不是失败）。
+    await seedTarget({ id: 'st-default-status', nextRunAt: base - 1_000, config: '{}' });
+
+    const res = await runTick(env, { now: () => base, fetch: okFetch() });
+    expect(res).toEqual({ probed: 1, skipped: 0, failed: 0 });
+
+    const check = await env.DB.prepare(`SELECT ok FROM checks_raw WHERE target_id = ?`)
+      .bind('st-default-status')
+      .first<{ ok: number }>();
+    expect(check?.ok).toBe(1);
+  });
+
+  it('skips a target whose expectStatus is not an array instead of faking a timeout failure', async () => {
+    await disableAllTargets();
+    const base = nextBase();
+    // 手写 D1 的典型错误：expectStatus 写成 200。旧实现会 .includes 抛 TypeError，
+    // 被 catch 归成 timeout → 写 check → 3 tick 后开假 incident。现在必须 skip。
+    await seedTarget({ id: 'st-bad-status', nextRunAt: base - 1_000, config: '{"expectStatus":200}' });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    let now = base;
+    for (let tick = 0; tick < 3; tick++) {
+      const res = await runTick(env, { now: () => now, fetch: okFetch() });
+      expect(res).toEqual({ probed: 0, skipped: 1, failed: 0 });
+      // 每个 tick 都必须推进 next_run_at（claim），否则会永久占住分片名额。
+      const target = await env.DB.prepare(`SELECT next_run_at FROM targets WHERE id = ?`)
+        .bind('st-bad-status')
+        .first<{ next_run_at: number }>();
+      expect(target?.next_run_at).toBe(now + INTERVAL_MS);
+      now += INTERVAL_MS;
+    }
+
+    expect(await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id = ?`, 'st-bad-status')).toBe(0);
+    expect(await count(`SELECT COUNT(*) AS n FROM checks_rollup WHERE target_id = ?`, 'st-bad-status')).toBe(0);
+    expect(await count(`SELECT COUNT(*) AS n FROM incidents WHERE target_id = ?`, 'st-bad-status')).toBe(0);
+    // 配置错误要大声报出来，不能静默：日志里必须点名 target。
+    expect(errorSpy).toHaveBeenCalled();
+    expect(errorSpy.mock.calls.some((call) => String(call[0]).includes('st-bad-status'))).toBe(true);
+    errorSpy.mockRestore();
+  });
+
+  it('skips a target whose config is not valid JSON', async () => {
+    await disableAllTargets();
+    const base = nextBase();
+    await seedTarget({ id: 'st-bad-json', nextRunAt: base - 1_000, config: 'not json' });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+
+    const res = await runTick(env, {
+      now: () => base,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(res).toEqual({ probed: 0, skipped: 1, failed: 0 });
+    // 坏 config 连 fetch 都不能发出去。
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id = ?`, 'st-bad-json')).toBe(0);
+    expect(await count(`SELECT COUNT(*) AS n FROM incidents WHERE target_id = ?`, 'st-bad-json')).toBe(0);
+    const target = await env.DB.prepare(`SELECT next_run_at FROM targets WHERE id = ?`)
+      .bind('st-bad-json')
+      .first<{ next_run_at: number }>();
+    expect(target?.next_run_at).toBe(base + INTERVAL_MS);
+    errorSpy.mockRestore();
+  });
+
+  it('never probes a target whose asset is disabled', async () => {
+    await disableAllTargets();
+    const base = nextBase();
+    // B3：target 自己 enabled=1，但所属 asset 已停用 → 不该出现在到期列表里。
+    await seedTarget({ id: 'st-disabled-asset', nextRunAt: base - 1_000, assetEnabled: 0 });
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+
+    const res = await runTick(env, {
+      now: () => base,
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(res).toEqual({ probed: 0, skipped: 0, failed: 0 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id = ?`, 'st-disabled-asset')).toBe(0);
+    // 没被 claim：next_run_at 原样留在过去，也不占分片名额。
+    const target = await env.DB.prepare(`SELECT next_run_at, enabled FROM targets WHERE id = ?`)
+      .bind('st-disabled-asset')
+      .first<{ next_run_at: number; enabled: number }>();
+    expect(target?.enabled).toBe(1);
+    expect(target?.next_run_at).toBe(base - 1_000);
   });
 
   it('probes at most SHARD_LIMIT targets per tick and leaves the rest due', async () => {

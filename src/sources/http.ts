@@ -12,6 +12,43 @@ export interface ProbeDeps {
   now: () => number;
 }
 
+/**
+ * 目标 config 非法（例如手写 D1 里把 expectStatus 写成 200 而不是 [200]）。
+ *
+ * 这类错误是「配置坏了」，不是「目标挂了」：绝不能落成 timeout 的失败 observation，
+ * 否则会写 check、拉低 uptime、3 个 tick 后开出假 incident。调度器把它当 skip 处理。
+ */
+export class ConfigError extends Error {
+  /** 原始 config，方便调度器把坏字段原样打进日志。 */
+  readonly config: Record<string, unknown>;
+
+  constructor(message: string, config: Record<string, unknown> = {}) {
+    super(message);
+    this.name = 'ConfigError';
+    this.config = config;
+  }
+}
+
+/** config 缺 expectStatus 时的默认期望状态。 */
+export const DEFAULT_EXPECT_STATUS: readonly number[] = [200];
+
+// expectStatus 必须是非空整数数组。合法性检查放在探测之前：非法配置不该产生任何
+// check / rollup / incident，连 fetch 都不该发出去。
+export function readExpectStatus(config: Record<string, unknown>): number[] {
+  const raw = config.expectStatus;
+  if (raw === undefined) return [...DEFAULT_EXPECT_STATUS];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new ConfigError(
+      `expectStatus must be a non-empty number[] (got ${Array.isArray(raw) ? 'empty array' : JSON.stringify(raw)})`,
+      config,
+    );
+  }
+  if (!raw.every((v) => typeof v === 'number' && Number.isInteger(v))) {
+    throw new ConfigError(`expectStatus must contain only integers (got ${JSON.stringify(raw)})`, config);
+  }
+  return raw;
+}
+
 function classify(e: unknown): { errorKind: 'timeout' | 'dns' | 'tls' | 'refused'; message: string } {
   const err = e as { name?: string; message?: string };
   const msg = err?.message ?? String(e);
@@ -23,7 +60,7 @@ function classify(e: unknown): { errorKind: 'timeout' | 'dns' | 'tls' | 'refused
 }
 
 export async function probeHttp(target: Target, deps: ProbeDeps): Promise<Observation> {
-  const expectStatus = (target.config.expectStatus as number[] | undefined) ?? [200];
+  const expectStatus = readExpectStatus(target.config);
   const started = deps.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), target.timeoutMs);

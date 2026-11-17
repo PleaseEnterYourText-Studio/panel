@@ -1,6 +1,9 @@
 // 故障列表：未关闭的排前面（open 优先），同组内按 opened_at 倒序。
 // incidents.state 落库只写 'down' / 'closed'（Task 3 裁定），活跃与否一律看 closed_at；
 // 响应里把它映射成展示语义 'open' / 'closed'，不让下游去记落库口径。
+//
+// 口径与 overview / services 一致：只有 target.enabled = 1 且 asset.enabled = 1 的对象
+// 的历史 incident 才出现在列表里。停用对象的故障是「已关闭的世界」，不该继续占用注意力。
 
 import { Hono } from 'hono';
 import type { Env } from '../env';
@@ -38,8 +41,8 @@ const LIST_SQL = `
          a.slug AS service_slug,
          a.name AS service_name
     FROM incidents i
-    LEFT JOIN targets t ON t.id = i.target_id
-    LEFT JOIN assets a ON a.id = t.asset_id
+    JOIN targets t ON t.id = i.target_id AND t.enabled = 1
+    JOIN assets a ON a.id = t.asset_id AND a.enabled = 1
    ORDER BY (i.closed_at IS NULL) DESC, i.opened_at DESC
    LIMIT ?
 `;

@@ -107,8 +107,15 @@ export async function getAssetBySlug(db: D1Database, slug: string): Promise<Asse
 }
 
 export async function listDueTargets(db: D1Database, now: number, limit: number): Promise<TargetRow[]> {
+  // 口径：target.enabled = 1 且所属 asset.enabled = 1。停用 asset 下的 target 不再到期，
+  // 因此不探测、不写 checks/rollup、不开 incident、不占 40 个分片名额。
   const { results } = await db
-    .prepare(`SELECT * FROM targets WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC LIMIT ?`)
+    .prepare(
+      `SELECT t.* FROM targets t
+         JOIN assets a ON a.id = t.asset_id AND a.enabled = 1
+        WHERE t.enabled = 1 AND t.next_run_at <= ?
+        ORDER BY t.next_run_at ASC LIMIT ?`,
+    )
     .bind(now, limit)
     .all<TargetRow>();
   return results;

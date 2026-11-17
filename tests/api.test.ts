@@ -181,8 +181,8 @@ describe('GET /api/overview', () => {
       downCount: 0,
       unknownCount: 0,
       lastTickAt: at,
-      // 单个 target，interval 180s → floor(86400 / 180)
-      writeEstimate: 480,
+      // 单个 target，interval 180s → floor(86400 / 180) = 480 次探测 × 写入系数 3
+      writeEstimate: 1440,
     });
   });
 
@@ -214,8 +214,8 @@ describe('GET /api/overview', () => {
 
     const body = (await (await request(appAs('ops'), '/api/overview')).json()) as Overview;
     expect(body).toMatchObject({ okCount: 0, suspectCount: 0, downCount: 0, unknownCount: 1 });
-    // 停用的 target 不计入每日写入估算。
-    expect(body.writeEstimate).toBe(480);
+    // 停用的 target 不计入每日写入估算（1,440 = 480 次探测 × 3 行写入）。
+    expect(body.writeEstimate).toBe(1440);
   });
 });
 

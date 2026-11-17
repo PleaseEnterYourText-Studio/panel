@@ -3,7 +3,7 @@
 // 静默兜底会让调度器把「没实现」当成「探测失败」，误开 incident。
 
 import type { Observation, Target } from '../domain/observation';
-import { probeHttp, type ProbeDeps } from './http';
+import { ConfigError, probeHttp, type ProbeDeps } from './http';
 
 export class UnsupportedSourceError extends Error {
   readonly source: string;
@@ -20,4 +20,4 @@ export async function resolveSource(target: Target, deps: ProbeDeps): Promise<Ob
   throw new UnsupportedSourceError(target.source);
 }
 
-export type { ProbeDeps };
+export { ConfigError, type ProbeDeps };

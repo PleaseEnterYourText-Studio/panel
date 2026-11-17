@@ -4,8 +4,8 @@
 // - 分片：免费版单次调用最多 50 个外部 subrequest，本 tick 最多探测 40 个 target，
 //   并发 6（Workers 出站连接上限），剩下的到期 target 留给下一分钟。
 // - 每个 target 独立 try/catch：一个源的异常不能让整批 tick 挂掉。未实现的 source
-//   抛 UnsupportedSourceError，按 skip 处理（不写 check、不动 incident），
-//   否则 seed 里一个 tcp target 就能让 scheduled 永久失败。
+//   抛 UnsupportedSourceError、坏 config 抛 ConfigError，都按 skip 处理（不写 check、
+//   不动 incident）。未知异常同样 skip + 大声 log，绝不伪装成 timeout 失败。
 // - 状态机从历史重建（rebuildMachine），绝不能用 initial() 播种：否则 failStreak
 //   每 tick 都是 1，down 永远触发不了。
 // - claim-first：tick 一开头就用一条 batch 推进本 tick 认领的 target（CAS）。
@@ -33,7 +33,7 @@ import {
 } from '../db/queries';
 import { step, type Machine } from '../domain/incident';
 import type { Observation, Target } from '../domain/observation';
-import { UnsupportedSourceError, resolveSource } from '../sources';
+import { ConfigError, UnsupportedSourceError, resolveSource } from '../sources';
 import { RECENT_HISTORY, rebuildMachine } from './machine';
 
 export const SHARD_LIMIT = 40;
@@ -50,7 +50,7 @@ export interface TickDeps {
 export interface TickResult {
   /** 本 tick 真正探测过的 target 数（含失败，不含 skip / 未抢到 claim 的）。 */
   probed: number;
-  /** P0 未实现的 source，不写 check、不动 incident。 */
+  /** 未探测的 target：未实现的 source / 配置损坏 / 探测源 bug，不写 check、不动 incident。 */
   skipped: number;
   /** 探测成功但落库（check / rollup / incident 流转）失败的 target 数。claim 不回滚。 */
   failed: number;
@@ -74,23 +74,37 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 }
 
 function toTarget(row: TargetRow): Target {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.config);
+  } catch (e) {
+    // 手写 D1 时 config 写坏（少引号 / 尾逗号）是配置错误，不是目标故障：
+    // 抛 ConfigError 让 probeTarget 走 skip，绝不产出一条 timeout 的失败 observation。
+    throw new ConfigError(`target ${row.id} has malformed config JSON: ${String(e)}`, {
+      config: row.config,
+    });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ConfigError(`target ${row.id} config must be a JSON object`, { config: row.config });
+  }
   return {
     id: row.id,
     source: row.source as Target['source'],
     form: row.form,
-    config: JSON.parse(row.config) as Record<string, unknown>,
+    config: parsed as Record<string, unknown>,
     timeoutMs: row.timeout_ms,
   };
 }
 
-// 探测单个 target。返回 null 表示 skip（P0 未实现的 source）。
+// 探测单个 target。返回 null 表示 skip（P0 未实现的 source / 配置损坏）。
 // 历史必须在本次 check 落库之前读：否则会把本次结果先折叠一遍、再 step 一遍，重复计入。
-async function probeTarget(
-  env: Env,
-  deps: TickDeps,
-  row: TargetRow,
-  now: number,
-): Promise<TargetSnapshot | null> {
+//
+// skip 的三种来源都必须「不写 checks_raw、不写 rollup、不动 incident」，并且
+// next_run_at 已在 claim 时推进（不会占住分片名额反复被取到）：
+//   1. UnsupportedSourceError —— source 在 P0 未实现；
+//   2. ConfigError —— config 坏了（JSON 解析失败 / expectStatus 不是数组）；
+//   3. 其它未知异常 —— 源码 bug。也走 skip 并大声 log，绝不伪装成 timeout。
+async function probeTarget(env: Env, deps: TickDeps, row: TargetRow): Promise<TargetSnapshot | null> {
   let open: IncidentRow | null = null;
   let recent: { ok: number }[] = [];
   let historyOk = true;
@@ -113,20 +127,15 @@ async function probeTarget(
     return { row, open, recent, observation, historyOk };
   } catch (e) {
     if (e instanceof UnsupportedSourceError) return null;
-    // 探测本身抛错（配置损坏、解析失败等）按本次失败计，照常写 check / 推进状态。
-    return {
-      row,
-      open,
-      recent,
-      historyOk,
-      observation: {
-        targetId: row.id,
-        at: now,
-        ok: false,
-        errorKind: 'timeout',
-        detail: { message: String(e) },
-      },
-    };
+    if (e instanceof ConfigError) {
+      // 配置错误：大声报出来（这是运维要修的手写数据），但不产生任何观测数据。
+      console.error(`scheduler: config error for target ${row.id}, skipped: ${e.message}`);
+      return null;
+    }
+    // 走到这里说明是探测源里的 bug（不该抛的异常）。上抛会拖垮整批 tick，
+    // 记成失败 observation 会把 bug 伪装成目标故障——两条都不对，skip + 大声 log。
+    console.error(`scheduler: unexpected probe error for target ${row.id}, skipped`, e);
+    return null;
   }
 }
 
@@ -205,7 +214,7 @@ export async function runTick(env: Env, deps: TickDeps): Promise<TickResult> {
   const claimed = due.filter((row) => claimedIds.has(row.id));
   if (claimed.length === 0) return { probed: 0, skipped: 0, failed: 0 };
 
-  const snapshots = await mapLimit(claimed, CONCURRENCY, (row) => probeTarget(env, deps, row, now));
+  const snapshots = await mapLimit(claimed, CONCURRENCY, (row) => probeTarget(env, deps, row));
   const probed = snapshots.filter((s): s is TargetSnapshot => s !== null);
   const observations = probed.map((s) => s.observation);
 
