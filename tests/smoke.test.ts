@@ -1,4 +1,4 @@
-import { env, SELF } from 'cloudflare:test';
+import { SELF } from 'cloudflare:test';
 import { describe, it, expect } from 'vitest';
 
 describe('health', () => {
@@ -7,6 +7,6 @@ describe('health', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { ok: boolean; version: string };
     expect(body.ok).toBe(true);
-    expect(typeof body.version).toBe('string');
+    expect(body.version).toBe('0.1.0');
   });
 });

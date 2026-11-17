@@ -6,6 +6,13 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
+        // 测试用兼容日期低于生产：@cloudflare/vitest-pool-workers@0.23.0
+        // 内嵌 wrangler 4.124.0 + miniflare 5.20260815，其 workerd 最高支持
+        // 2026-08-22；生产用 wrangler.jsonc 的 2026-11-01（wrangler 4.163.0
+        // 的 workerd 1.20261116.1）。覆盖使两边成为不同的运行时，2026-08-23
+        // ~ 2026-11-01 新增的 compat flag 会测试通过、生产不一致。
+        // 移除条件：迁移到 @cloudflare/vitest-plugin 后两边共用同一个 workerd，
+        // 即可删掉这行覆盖，让测试直接继承 wrangler.jsonc 的日期。
         compatibilityDate: '2026-08-22',
         bindings: {
           ACCESS_TEAM_DOMAIN: 'https://test.cloudflareaccess.com',

@@ -21,6 +21,8 @@
   "include": [
     "src",
     "web",
-    "tests"
+    "tests",
+    "vite.config.ts",
+    "vitest.config.ts"
   ]
 }
