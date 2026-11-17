@@ -137,6 +137,10 @@ export async function insertChecks(db: D1Database, checks: CheckRow[]): Promise<
   await db.batch(checks.map((c) => stmt.bind(c.target_id, c.at, c.ok, c.latency_ms, c.error_kind, c.detail)));
 }
 
+// 契约：本函数非幂等 —— 同一条 check 重复调用会重复累加计数与耗时。
+// 调度器必须保证「每个 target 每个 tick 只写一次 rollup」；重跑/重试前先确认。
+// 若确实写重了，48 小时内可从 checks_raw 重新聚合修正（checks_raw 之后会被清理，
+// checks_rollup 是长期唯一真相，写错不可逆）。
 export async function upsertRollup(
   db: D1Database,
   targetId: string,

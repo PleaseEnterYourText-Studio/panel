@@ -1,23 +1,10 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
 import { defineConfig } from 'vitest/config';
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
 
-// vitest-pool-workers 不会自动应用 migrations/，测试进程在 Node 里把 SQL 读成
-// applyD1Migrations 需要的 { name, queries } 结构，通过 binding 注入 worker。
-// 注意：sql.split(';') 只适用于本仓库的迁移（不含字符串字面量里的分号）。
-const migrationsDir = fileURLToPath(new URL('./migrations', import.meta.url));
-const testMigrations = readdirSync(migrationsDir)
-  .filter((file) => file.endsWith('.sql'))
-  .sort()
-  .map((name) => ({
-    name,
-    queries: readFileSync(join(migrationsDir, name), 'utf8')
-      .split(';')
-      .map((query) => query.trim())
-      .filter((query) => query.length > 0),
-  }));
+// vitest-pool-workers 不会自动应用 migrations/。用包自带的 readD1Migrations
+// （内部走 wrangler 的 SQL 拆分器，能正确处理字符串字面量中的分号）在 Node
+// 侧读出 { name, queries }，再通过 binding 注入 worker，由 tests/setup.ts 应用。
+const testMigrations = await readD1Migrations('./migrations');
 
 export default defineConfig({
   plugins: [
