@@ -32,7 +32,10 @@ describe('incident state machine', () => {
   });
 
   it('reports unknown before any observation', () => {
-    expect(toStatus(initial())).toBe('unknown');
+    const m = initial();
+    expect(m.failStreak).toBe(0);
+    expect(m.okStreak).toBe(0);
+    expect(toStatus(m)).toBe('unknown');
   });
 
   // unknown 不等于 ok：首次成功不能让新 target 宣称正常。
@@ -40,5 +43,48 @@ describe('incident state machine', () => {
     const m = step(initial(), true);
     expect(m.okStreak).toBe(1);
     expect(toStatus(m)).toBe('suspect');
+  });
+
+  it('reaches ok from unknown with two consecutive successes', () => {
+    const m = step(step(initial(), true), true);
+    expect(m.okStreak).toBe(2);
+    expect(toStatus(m)).toBe('ok');
+  });
+
+  it('drops ok to suspect on a single failure', () => {
+    const ok = step(step(initial(), true), true);
+    const m = step(ok, false);
+    expect(m.failStreak).toBe(1);
+    expect(toStatus(m)).toBe('suspect');
+  });
+
+  // down 是粘性状态：已确认的故障只能靠连续 2 次成功解除。
+  // 否则「成功一次把 failStreak 清零 → 再失败一次」会把故障降级成 suspect，
+  // 下游会当成新故障，产生重复 incident.opened。
+  it('keeps down when a recovery attempt is interrupted by a failure', () => {
+    let m: Machine = { state: 'down', failStreak: 3, okStreak: 0 };
+    m = step(m, true);
+    expect(m.state).toBe('down');
+    expect(m.okStreak).toBe(1);
+    const interrupted = step(m, false);
+    expect(interrupted.state).toBe('down'); // 不掉回 suspect
+    expect(interrupted.failStreak).toBe(1);
+    // 恢复进度被清零，必须重新攒满 2 次成功。
+    const again = step(interrupted, true);
+    expect(again.state).toBe('down');
+    expect(again.okStreak).toBe(1);
+    expect(step(again, true).state).toBe('ok');
+  });
+
+  it('clamps the failure streak at the threshold', () => {
+    let m = initial();
+    m = step(m, false);
+    m = step(m, false);
+    m = step(m, false);
+    expect(m.state).toBe('down');
+    expect(m.failStreak).toBe(3);
+    m = step(m, false);
+    expect(m.state).toBe('down'); // 第 4 次失败不产生第二次 down 进入
+    expect(m.failStreak).toBe(3); // clamp，避免持久化后数值漂到无穷大
   });
 });
