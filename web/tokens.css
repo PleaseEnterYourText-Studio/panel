@@ -200,7 +200,7 @@ pre {
 }
 
 /* 卡片的第一个内容行不要上边框。有 .h 头部时首个 .r 不是 first-child，
-   所以必须用相邻兄弟选择器；原来的 .card > .r:first-child 是死规则（双线来源）。 */
+   所以必须用相邻兄弟选择器；原来的 :first-child 版本在有 .h 时永不命中，是双线来源。 */
 .card > .h + .r {
   border-top: none;
 }
@@ -283,19 +283,69 @@ th {
   margin-bottom: 10px;
 }
 
-.tabs a {
+/* 标签页同时支持 <a> 与 <button>：详情页用按钮切本地状态，不整页跳转。 */
+.tabs a,
+.tabs button {
   padding: 7px 0;
   color: var(--muted);
+  border: none;
   border-bottom: 2px solid transparent;
+  background: none;
+  font-family: inherit;
+  font-size: var(--fs-body);
+  cursor: pointer;
 }
 
-.tabs a:hover {
+.tabs a:hover,
+.tabs button:hover {
   color: var(--text);
   text-decoration: none;
 }
 
-.tabs a.on {
+.tabs a.on,
+.tabs button.on {
   color: var(--bright);
   border-bottom-color: #f78166;
   font-weight: 600;
+}
+
+/* 详情页两列：主列自适应，右栏固定 260px；窄屏塌成单列。 */
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 12px;
+  align-items: start;
+}
+
+.split > .main-col,
+.split > .side-col {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 右栏描述列表：左 label 右值，值过长时省略并保留 title。 */
+.kv {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 10px;
+  font-size: var(--fs-table);
+}
+
+.kv .k {
+  color: var(--muted);
+}
+
+.kv .v {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
