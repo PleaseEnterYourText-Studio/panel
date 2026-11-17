@@ -2,7 +2,7 @@ import { env } from 'cloudflare:test';
 import { describe, it, expect, vi } from 'vitest';
 import { CONCURRENCY, SHARD_LIMIT, runTick } from '../src/scheduler/run';
 import { rebuildMachine } from '../src/scheduler/machine';
-import type { IncidentRow, RollupRow } from '../src/db/queries';
+import { claimTargets, type IncidentRow, type RollupRow } from '../src/db/queries';
 
 // 所有时间都是相对这里的偏移；bucket 一律按 Math.floor(at / 60_000) 现算，
 // 不在测试里写死分钟编号（改 T0 时不会有第二处魔数要同步）。
@@ -60,7 +60,7 @@ describe('runTick platform limits', () => {
   // 必须最先跑：本文件共用同一个 D1，后续用例会播种到期 target。
   it('does nothing when no target is due', async () => {
     const res = await runTick(env, { now: () => T0, fetch: okFetch() });
-    expect(res).toEqual({ probed: 0, skipped: 0 });
+    expect(res).toEqual({ probed: 0, skipped: 0, failed: 0 });
   });
 });
 
@@ -71,7 +71,7 @@ describe('runTick probe pipeline', () => {
     await seedTarget({ id: 'st-ok', nextRunAt: base - 1_000 });
 
     const res = await runTick(env, { now: () => base, fetch: okFetch() });
-    expect(res).toEqual({ probed: 1, skipped: 0 });
+    expect(res).toEqual({ probed: 1, skipped: 0, failed: 0 });
 
     const checks = await env.DB.prepare(`SELECT * FROM checks_raw WHERE target_id = ?`)
       .bind('st-ok')
@@ -106,7 +106,7 @@ describe('runTick probe pipeline', () => {
     });
 
     // tcp 在 P0 未实现：不计入 probed、不调用 fetch、不写 check、不改 incident。
-    expect(res).toEqual({ probed: 0, skipped: 1 });
+    expect(res).toEqual({ probed: 0, skipped: 1, failed: 0 });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id = ?`, 'st-tcp')).toBe(0);
     expect(await count(`SELECT COUNT(*) AS n FROM incidents WHERE target_id = ?`, 'st-tcp')).toBe(0);
@@ -125,9 +125,17 @@ describe('runTick probe pipeline', () => {
 
     let now = base;
     for (let tick = 0; tick < 3; tick++) {
+      const tickNow = now;
       const res = await runTick(env, { now: () => now, fetch: statusFetch(502) });
-      expect(res).toEqual({ probed: 1, skipped: 0 });
+      expect(res).toEqual({ probed: 1, skipped: 0, failed: 0 });
       now += INTERVAL_MS;
+
+      // 探测失败也必须推进 next_run_at：claim 语义下这一点由 tick 开头的 batch 保证，
+      // 只测 incident 会漏掉「advanceTarget 被删掉也全绿」的回归。
+      const target = await env.DB.prepare(`SELECT next_run_at FROM targets WHERE id = ?`)
+        .bind('st-flap')
+        .first<{ next_run_at: number }>();
+      expect(target?.next_run_at).toBe(tickNow + INTERVAL_MS);
 
       const open = await count(
         `SELECT COUNT(*) AS n FROM incidents WHERE target_id = ? AND closed_at IS NULL`,
@@ -164,6 +172,65 @@ describe('runTick probe pipeline', () => {
 
     // 5 个 tick 各写一条 check，一条都不能丢。
     expect(await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id = ?`, 'st-flap')).toBe(5);
+
+    // 关闭后再连续失败 2 次（不到阈值 3）不允许立刻重开新 incident。
+    for (let tick = 0; tick < 2; tick++) {
+      const res = await runTick(env, { now: () => now, fetch: statusFetch(502) });
+      expect(res.probed).toBe(1);
+      now += INTERVAL_MS;
+    }
+    expect(await count(`SELECT COUNT(*) AS n FROM incidents WHERE target_id = ?`, 'st-flap')).toBe(1);
+    expect(
+      await count(`SELECT COUNT(*) AS n FROM incidents WHERE target_id = ? AND closed_at IS NULL`, 'st-flap'),
+    ).toBe(0);
+  });
+
+  it('probes at most SHARD_LIMIT targets per tick and leaves the rest due', async () => {
+    await disableAllTargets();
+    const base = nextBase();
+    // 41 个到期 target：cap-01..cap-40 的 next_run_at 更早，会被 LIMIT 40 取走；
+    // cap-41 的 next_run_at 最晚，必须落在分片窗口之外。
+    for (let i = 1; i <= 40; i++) {
+      await seedTarget({ id: `cap-${String(i).padStart(2, '0')}`, nextRunAt: base - 5_000 + i * 10 });
+    }
+    await seedTarget({ id: 'cap-41', nextRunAt: base - 1 });
+
+    const res = await runTick(env, { now: () => base, fetch: okFetch() });
+    expect(res).toEqual({ probed: 40, skipped: 0, failed: 0 });
+
+    // 第 41 个没被 claim 也没被探测：next_run_at 原样留在过去（下一分钟再处理）。
+    const overflow = await env.DB.prepare(`SELECT * FROM targets WHERE id = ?`)
+      .bind('cap-41')
+      .first<{ next_run_at: number; enabled: number }>();
+    expect(overflow?.next_run_at).toBe(base - 1);
+    expect(await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id = ?`, 'cap-41')).toBe(0);
+    expect(
+      await count(`SELECT COUNT(*) AS n FROM checks_raw WHERE target_id LIKE 'cap-%'`),
+    ).toBe(40);
+  });
+});
+
+describe('claimTargets (CAS)', () => {
+  it('only advances rows whose next_run_at still matches the value read', async () => {
+    await disableAllTargets();
+    const base = nextBase();
+    await seedTarget({ id: 'st-claim', nextRunAt: base - 1_000 });
+
+    const nextRunAt = base + INTERVAL_MS;
+    // 第一次：旧值匹配 → 认领成功。
+    expect(
+      await claimTargets(env.DB, [{ id: 'st-claim', expectedNextRunAt: base - 1_000, nextRunAt }]),
+    ).toEqual(['st-claim']);
+
+    // 第二次用同一个旧值 → changes=0（已被上一行推进），不能重复认领。
+    expect(
+      await claimTargets(env.DB, [{ id: 'st-claim', expectedNextRunAt: base - 1_000, nextRunAt }]),
+    ).toEqual([]);
+
+    const target = await env.DB.prepare(`SELECT next_run_at FROM targets WHERE id = ?`)
+      .bind('st-claim')
+      .first<{ next_run_at: number }>();
+    expect(target?.next_run_at).toBe(nextRunAt);
   });
 });
 

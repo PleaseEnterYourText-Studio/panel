@@ -8,23 +8,27 @@
 //   否则 seed 里一个 tcp target 就能让 scheduled 永久失败。
 // - 状态机从历史重建（rebuildMachine），绝不能用 initial() 播种：否则 failStreak
 //   每 tick 都是 1，down 永远触发不了。
+// - claim-first：tick 一开头就用一条 batch 推进本 tick 认领的 target（CAS）。
+//   既避免中途落库失败导致下一分钟整片重探（rollup 非幂等会重复累加），
+//   也让 40 target 的推进从 40 次 D1 往返压到 1 次。
 // - insertChecks 按 ≤100 条分块：queries 层单个 db.batch 无上限。
-// - upsertRollup 非幂等：每个 target 每 tick 只允许写一次 rollup。
-// - 探测失败 / skip 也要推进 next_run_at，否则失败的 target 每分钟被重试打爆额度。
+// - upsertRollups 非幂等：每个 target 每 tick 只允许写一次 rollup；全部合成一次 batch。
+// - 探测失败 / skip 的 target 也已在 claim 时推进了 next_run_at。
 
 import type { Env } from '../env';
 import {
-  advanceTarget,
+  claimTargets,
   closeIncident,
   getOpenIncident,
   insertChecks,
   insertIncident,
   listDueTargets,
   listRecentChecks,
-  upsertRollup,
+  upsertRollups,
   writeEvent,
   type CheckRow,
   type IncidentRow,
+  type RollupUpsert,
   type TargetRow,
 } from '../db/queries';
 import { step, type Machine } from '../domain/incident';
@@ -41,6 +45,15 @@ const CHECKS_CHUNK = 100;
 export interface TickDeps {
   now: () => number;
   fetch: typeof fetch;
+}
+
+export interface TickResult {
+  /** 本 tick 真正探测过的 target 数（含失败，不含 skip / 未抢到 claim 的）。 */
+  probed: number;
+  /** P0 未实现的 source，不写 check、不动 incident。 */
+  skipped: number;
+  /** 探测成功但落库（check / rollup / incident 流转）失败的 target 数。claim 不回滚。 */
+  failed: number;
 }
 
 interface TargetSnapshot {
@@ -170,32 +183,63 @@ async function applyTransition(env: Env, snapshot: TargetSnapshot): Promise<void
   }
 }
 
-export async function runTick(
-  env: Env,
-  deps: TickDeps,
-): Promise<{ probed: number; skipped: number }> {
+export async function runTick(env: Env, deps: TickDeps): Promise<TickResult> {
   const now = deps.now();
   const due = await listDueTargets(env.DB, now, SHARD_LIMIT);
-  if (due.length === 0) return { probed: 0, skipped: 0 };
+  if (due.length === 0) return { probed: 0, skipped: 0, failed: 0 };
 
-  const snapshots = await mapLimit(due, CONCURRENCY, (row) => probeTarget(env, deps, row, now));
+  // claim-first：tick 一开始就用一条 batch 把本 tick 认领的 target 推进到下一周期（CAS）。
+  // 必须在任何探测/落库之前：中途写失败时 next_run_at 已经离开本分钟窗口，
+  // 不会在下一分钟整片重探、把非幂等的 checks_rollup 重复累加，也不会让两个 tick
+  // 重叠覆盖同一个 target 的 incident。changes=0 的行被别的 tick 抢走，本 tick 丢弃。
+  const claimedIds = new Set(
+    await claimTargets(
+      env.DB,
+      due.map((row) => ({
+        id: row.id,
+        expectedNextRunAt: row.next_run_at,
+        nextRunAt: now + row.interval_sec * 1000,
+      })),
+    ),
+  );
+  const claimed = due.filter((row) => claimedIds.has(row.id));
+  if (claimed.length === 0) return { probed: 0, skipped: 0, failed: 0 };
+
+  const snapshots = await mapLimit(claimed, CONCURRENCY, (row) => probeTarget(env, deps, row, now));
   const probed = snapshots.filter((s): s is TargetSnapshot => s !== null);
   const observations = probed.map((s) => s.observation);
 
+  // 落库失败不回滚 claim（该 target 已经排到下一周期，下一次自然到期会重探），
+  // 但要记进 failed 并留日志：这部分数据是真丢了。
+  const failedIds = new Set<string>();
+
   const checkRows = observations.map(toCheckRow);
   for (let i = 0; i < checkRows.length; i += CHECKS_CHUNK) {
-    await insertChecks(env.DB, checkRows.slice(i, i + CHECKS_CHUNK));
+    const chunk = checkRows.slice(i, i + CHECKS_CHUNK);
+    try {
+      await insertChecks(env.DB, chunk);
+    } catch (e) {
+      console.error('scheduler: insertChecks failed', e);
+      for (const row of chunk) failedIds.add(row.target_id);
+    }
   }
 
-  // 每个 target 每个 tick 恰好一次（upsertRollup 非幂等，重复调用会重复累加）。
-  for (const o of observations) {
-    await upsertRollup(env.DB, o.targetId, Math.floor(o.at / 60_000), o.ok, o.latencyMs ?? null);
-  }
-
-  // 所有到期 target 都推进（含失败与 skip）：用 tick 的 now 而不是 observation.at，
-  // 保证同一 tick 内推进量一致；失败的 target 也必须离开本分钟的分片窗口。
-  for (const row of due) {
-    await advanceTarget(env.DB, row.id, now + row.interval_sec * 1000);
+  // 每个 target 每个 tick 恰好一次（upsertRollups 非幂等，重复写会重复累加）；
+  // 全部 rollup 合成一次 batch，40 target 的 rollup 往返从 40 次降到 1 次。
+  const rollups: RollupUpsert[] = observations.map((o) => ({
+    targetId: o.targetId,
+    bucketMin: Math.floor(o.at / 60_000),
+    ok: o.ok,
+    latencyMs: o.latencyMs ?? null,
+  }));
+  for (let i = 0; i < rollups.length; i += CHECKS_CHUNK) {
+    const chunk = rollups.slice(i, i + CHECKS_CHUNK);
+    try {
+      await upsertRollups(env.DB, chunk);
+    } catch (e) {
+      console.error('scheduler: upsertRollups failed', e);
+      for (const row of chunk) failedIds.add(row.targetId);
+    }
   }
 
   for (const snapshot of probed) {
@@ -203,8 +247,13 @@ export async function runTick(
       await applyTransition(env, snapshot);
     } catch (e) {
       console.error(`scheduler: incident transition failed for target ${snapshot.row.id}`, e);
+      failedIds.add(snapshot.row.id);
     }
   }
 
-  return { probed: probed.length, skipped: due.length - probed.length };
+  return {
+    probed: probed.length,
+    skipped: claimed.length - probed.length,
+    failed: failedIds.size,
+  };
 }

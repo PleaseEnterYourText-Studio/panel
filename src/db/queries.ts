@@ -142,6 +142,31 @@ export async function advanceTarget(db: D1Database, id: string, nextRunAt: numbe
   await db.prepare(`UPDATE targets SET next_run_at = ? WHERE id = ?`).bind(nextRunAt, id).run();
 }
 
+export interface TargetClaim {
+  id: string;
+  /** 取到该行时读到的旧值；只有数据库里仍是它才允许推进（CAS）。 */
+  expectedNextRunAt: number;
+  nextRunAt: number;
+}
+
+// claim-first：调度器 tick 开始先用一条 batch 把本 tick 认领的 target 推进到下一周期，
+// 用「旧 next_run_at」做 CAS 条件。返回真正认领成功的 id —— changes=0 说明该行已被
+// 别的 tick 抢走（next_run_at 不再是取到时的值），本 tick 必须丢弃、不探测不写库。
+// 一次 batch = 一次 D1 往返；逐条 UPDATE 会把 40 target 的 tick 变成 40 次往返。
+export async function claimTargets(db: D1Database, claims: TargetClaim[]): Promise<string[]> {
+  if (claims.length === 0) return [];
+  const stmt = db.prepare(`UPDATE targets SET next_run_at = ? WHERE id = ? AND next_run_at = ?`);
+  const results = await db.batch(
+    claims.map((c) => stmt.bind(c.nextRunAt, c.id, c.expectedNextRunAt)),
+  );
+  const claimed: string[] = [];
+  for (let i = 0; i < claims.length; i++) {
+    const claim = claims[i];
+    if (claim !== undefined && (results[i]?.meta.changes ?? 0) > 0) claimed.push(claim.id);
+  }
+  return claimed;
+}
+
 export async function insertChecks(db: D1Database, checks: CheckRow[]): Promise<void> {
   if (checks.length === 0) return;
   // 一次性 batch：D1 每次 batch 只走一趟网络往返，禁止逐条 run()。
@@ -174,6 +199,31 @@ export async function upsertRollup(
     )
     .bind(targetId, bucketMin, ok ? 1 : 0, ok ? 0 : 1, latencyMs ?? 0, latencyMs ?? 0)
     .run();
+}
+
+// 批量版 upsertRollup：一个 tick 的所有 rollup 一次 batch 写完（一次 D1 往返）。
+// 非幂等契约不变 —— 调用方仍须保证每个 target 每个 tick 只出现一次。
+export interface RollupUpsert {
+  targetId: string;
+  bucketMin: number;
+  ok: boolean;
+  latencyMs: number | null;
+}
+
+export async function upsertRollups(db: D1Database, rows: RollupUpsert[]): Promise<void> {
+  if (rows.length === 0) return;
+  const stmt = db.prepare(
+    `INSERT INTO checks_rollup (target_id, bucket_min, ok_count, fail_count, sum_ms, max_ms)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(target_id, bucket_min) DO UPDATE SET
+       ok_count = ok_count + excluded.ok_count,
+       fail_count = fail_count + excluded.fail_count,
+       sum_ms = sum_ms + excluded.sum_ms,
+       max_ms = MAX(max_ms, excluded.max_ms)`,
+  );
+  await db.batch(
+    rows.map((r) => stmt.bind(r.targetId, r.bucketMin, r.ok ? 1 : 0, r.ok ? 0 : 1, r.latencyMs ?? 0, r.latencyMs ?? 0)),
+  );
 }
 
 export async function getOpenIncident(db: D1Database, targetId: string): Promise<IncidentRow | null> {
