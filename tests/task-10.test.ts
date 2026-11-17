@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { badgeText } from '../web/components/StatusBadge';
-import { formatAgo, formatClock, formatLatency, formatUptime } from '../web/lib/format';
+import { formatAgo, formatClock, formatLatency, formatMinute, formatUptime } from '../web/lib/format';
+import { actionButtonText, actionDisabledReason } from '../web/lib/action-ui';
+import { ACTIONS } from '../src/domain/action';
 import { countStatuses, deriveServiceStatus } from '../web/lib/status';
 import type { ServiceCheck, ServiceTarget } from '../web/lib/api';
 import servicesSource from '../web/routes/Services.tsx?raw';
@@ -60,6 +62,26 @@ describe('服务详情页契约', () => {
   it('marks P1 tabs explicitly', () => {
     expect(detailSource).toContain('P1 提供');
   });
+
+  // 规格 §10.3 规则 1：不可点的动作不能「点了才知道」，必须给出可见原因。
+  it('explains why an action is not clickable', () => {
+    expect(detailSource).toContain('服务已停用');
+    expect(detailSource).toContain('无启用的检查目标');
+    expect(detailSource).toContain('正在执行');
+  });
+
+  // 规格 §10.3 规则 6：pending → ok。执行中要有文案，成功要有带时间戳的终态提示。
+  it('shows pending and success feedback for probe.run', () => {
+    expect(detailSource).toContain('执行中');
+    expect(detailSource).toContain('已探测');
+    expect(detailSource).toContain('最近一次成功');
+    // 停用服务不得再发探测：runProbe 里必须有 service.enabled 闸门。
+    expect(detailSource).toMatch(/!service\.enabled/);
+  });
+
+  it('aligns the down counter with the header badge', () => {
+    expect(detailSource).toContain('displayCounts');
+  });
 });
 
 describe('api client non-JSON guard', () => {
@@ -115,6 +137,39 @@ describe('状态推导', () => {
   });
 });
 
+describe('动作可点性（§10.3 规则 1 / 6）', () => {
+  const probe = ACTIONS.find((a) => a.id === 'probe.run')!;
+  const restart = ACTIONS.find((a) => a.id === 'service.restart')!;
+
+  it('blocks probe.run when the service is disabled and says why', () => {
+    expect(actionDisabledReason(probe, { serviceEnabled: false, enabledTargetCount: 2, busy: false })).toBe(
+      '服务已停用',
+    );
+  });
+
+  it('blocks probe.run when there is no enabled target and says why', () => {
+    expect(actionDisabledReason(probe, { serviceEnabled: true, enabledTargetCount: 0, busy: false })).toBe(
+      '无启用的检查目标',
+    );
+  });
+
+  it('reports pending while busy and P3 for phase 3 actions', () => {
+    expect(actionDisabledReason(probe, { serviceEnabled: true, enabledTargetCount: 1, busy: true })).toBe(
+      '正在执行',
+    );
+    expect(actionDisabledReason(restart, { serviceEnabled: true, enabledTargetCount: 1, busy: false })).toBe(
+      'P3 提供',
+    );
+    expect(actionButtonText(probe, { serviceEnabled: true, enabledTargetCount: 1, busy: true })).toContain(
+      '执行中',
+    );
+  });
+
+  it('is clickable when everything is healthy', () => {
+    expect(actionDisabledReason(probe, { serviceEnabled: true, enabledTargetCount: 1, busy: false })).toBeNull();
+  });
+});
+
 describe('展示格式化', () => {
   it('renders a dash for missing data, never a fake number', () => {
     expect(formatLatency(null)).toBe('—');
@@ -127,5 +182,12 @@ describe('展示格式化', () => {
     expect(formatLatency(12.4)).toBe('12ms');
     expect(formatUptime(99.95)).toBe('99.95%');
     expect(formatAgo(Date.now() - 5 * 60_000, Date.now())).toBe('5 分钟前');
+    expect(formatMinute(null)).toBe('—');
+  });
+
+  it('shows a dash for future timestamps instead of "刚刚"', () => {
+    const now = Date.now();
+    // 客户端时钟领先服务端：负数差值不能圆成「刚刚」。
+    expect(formatAgo(now + 30_000, now)).toBe('—');
   });
 });

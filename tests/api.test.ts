@@ -365,6 +365,33 @@ describe('POST /api/probes/:targetId/run', () => {
     expect(await count(`SELECT COUNT(*) AS n FROM events`)).toBe(0);
   });
 
+  // P0 的到期查询只过滤 targets.enabled，不看 assets.enabled：手动探测必须自己挡住
+  // 停用对象，否则停用服务的探测会真写 checks_raw、推进状态机并留审计。
+  it('rejects a target whose asset is disabled with 409 and does nothing', async () => {
+    const targetId = nextId('target');
+    // 显式钉死 next_run_at：默认播种用 Date.now()，与断言时刻差几毫秒会变成 flaky。
+    const beforeRunAt = 4_000_000_000_000;
+    const { assetId } = await seedService({
+      slug: 'alpha',
+      enabled: 0,
+      target: { id: targetId, nextRunAt: beforeRunAt },
+    });
+
+    const res = await request(appAs('ops'), `/api/probes/${targetId}/run`, { method: 'POST' });
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({ error: 'asset_disabled' });
+    // 不写审计、不落检查、不产生事件，next_run_at 也不能被拨到 0。
+    expect(await count(`SELECT COUNT(*) AS n FROM events`)).toBe(0);
+    expect(await count(`SELECT COUNT(*) AS n FROM checks_raw`)).toBe(0);
+    expect(await count(`SELECT COUNT(*) AS n FROM incidents`)).toBe(0);
+    const target = await env.DB.prepare(`SELECT next_run_at, asset_id FROM targets WHERE id = ?`)
+      .bind(targetId)
+      .first<{ next_run_at: number; asset_id: string }>();
+    expect(target?.asset_id).toBe(assetId);
+    expect(target!.next_run_at).toBe(beforeRunAt);
+  });
+
   it('rejects a viewer with 403 and performs no action', async () => {
     const targetId = nextId('target');
     await seedService({ slug: 'alpha', target: { id: targetId } });

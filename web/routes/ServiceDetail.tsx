@@ -1,16 +1,25 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ServiceDetail as ServiceDetailDto, ServiceSummary, ServiceTarget, Status } from '../lib/api';
+import type {
+  ServiceDetail as ServiceDetailDto,
+  ServiceDto,
+  ServiceSummary,
+  ServiceTarget,
+  Status,
+} from '../lib/api';
 import { ApiError, get, post } from '../lib/api';
 import { StatusBadge } from '../components/StatusBadge';
 import {
   describeError,
   formatAgo,
+  formatClock,
   formatDateTime,
   formatLatency,
+  formatMinute,
   formatUptime,
 } from '../lib/format';
 import { ACTIONS, isEnabled, type ActionDef } from '../../src/domain/action';
 import { countStatuses, deriveServiceStatus, latestByTarget } from '../lib/status';
+import { actionButtonText, actionDisabledReason, type ActionContext } from '../lib/action-ui';
 
 /**
  * 服务详情页：GitHub 对象页骨架。
@@ -22,6 +31,10 @@ import { countStatuses, deriveServiceStatus, latestByTarget } from '../lib/statu
  *
  * 标签页：概览 / 检查 N 有内容；部署 / 事件 / 设置是 P1，显示「P1 提供」。
  * 正文两列：主列状态计数 + 检查表，右栏关于卡片。
+ *
+ * 动作区语义（规格 §10.3 规则 1 / 6）：可点性由 action-ui.ts 的纯函数判定，
+ * 不可点时按钮 disabled 且 title + 可见原因写明（服务已停用 / 无启用的检查目标 /
+ * 正在执行 / P3 提供）；执行中按钮进 pending 文案，成功后弹一条带时间戳的完成提示。
  *
  * 状态来源：优先用 /api/services 列表里的 summary（后端含未关闭 incident，
  * 能得出 down）；列表拿不到时用详情页的 recentChecks 按 target 推导，
@@ -62,6 +75,7 @@ export function ServiceDetail({ slug }: { slug: string }) {
   const [summary, setSummary] = useState<ServiceSummary | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<TabId>('overview');
 
@@ -89,20 +103,38 @@ export function ServiceDetail({ slug }: { slug: string }) {
     setData(null);
     setSummary(null);
     setError(null);
+    setNotice(null);
     void load();
   }, [load]);
 
-  const runProbe = async (targets: ServiceTarget[]) => {
+  // 成功提示是「短暂」的：6 秒后自己消失，不留在页面上冒充状态。
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 6_000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const runProbe = async (service: ServiceDto, targets: ServiceTarget[]) => {
     const runnable = targets.filter((t) => t.enabled);
-    if (runnable.length === 0) return;
+    // 按钮已经是 disabled，这里是第二道闸：停用服务 / 无目标绝不允许静默空点。
+    if (!service.enabled || runnable.length === 0 || busy) return;
+
     setBusy(true);
     setActionError(null);
+    setNotice(null);
     try {
       // 每个 enabled target 各跑一次：手动探测是 target 粒度，不是 asset 粒度。
+      // 后端对停用 asset 返回 409 asset_disabled，前端在此之前就不会发出去。
       await Promise.all(runnable.map((t) => post(`/api/probes/${encodeURIComponent(t.id)}/run`)));
       await load();
+      setNotice({ text: `已探测 ${runnable.length} 个目标 · ${formatClock(Date.now())}` });
     } catch (e) {
-      setActionError(describeError(e));
+      // 竞态兜底：页面还认为服务启用、后端已停用（他人刚改），409 要给人话。
+      if (e instanceof ApiError && e.status === 409) {
+        setActionError('服务已停用，探测请求被拒绝（409）');
+      } else {
+        setActionError(describeError(e));
+      }
     } finally {
       setBusy(false);
     }
@@ -158,6 +190,19 @@ export function ServiceDetail({ slug }: { slug: string }) {
 
   const tabLabel = (id: TabId): string => (id === 'checks' ? `检查 ${targets.length}` : TAB_LABEL[id]);
 
+  const actionCtx: ActionContext = {
+    serviceEnabled: service.enabled,
+    enabledTargetCount: enabledTargets.length,
+    busy,
+  };
+  const probeAction = ACTIONS.find((a) => a.id === 'probe.run');
+  const probeReason = probeAction ? actionDisabledReason(probeAction, actionCtx) : null;
+
+  // 故障计数与头部徽章对齐：列表 summary 判 down（有未关闭事件）时，详情页按检查
+  // 推导不出 down，同屏徽章与数字会打架。以徽章为准，至少记 1 个故障 target。
+  const displayCounts =
+    status === 'down' ? { ...counts, down: Math.max(counts.down, 1) } : counts;
+
   return (
     <div>
       <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-table)', marginBottom: 6 }}>
@@ -182,20 +227,30 @@ export function ServiceDetail({ slug }: { slug: string }) {
         <span style={{ color: 'var(--muted)', fontSize: 'var(--fs-table)' }} className="num">
           {service.slug}
         </span>
+        <span
+          className="num"
+          title={formatDateTime(summary?.lastOkAt ?? null)}
+          style={{ color: 'var(--muted)', fontSize: 'var(--fs-table)' }}
+        >
+          最近一次成功 {formatMinute(summary?.lastOkAt ?? null)}
+        </span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {ACTIONS.map((action: ActionDef) => {
-            const enabled = isEnabled(action) && !busy;
+            // 规则 1：不可点必须带原因（disabled + title + 旁注），不能点了才知道。
+            const reason = actionDisabledReason(action, actionCtx);
+            const disabled = reason !== null;
             const isProbe = action.id === 'probe.run';
             return (
               <button
                 key={action.id}
                 className={'btn' + (action.danger === 'typed' ? ' danger' : '')}
-                disabled={!enabled}
-                aria-disabled={!enabled}
-                title={isEnabled(action) ? action.label : `${action.label}（P3 提供）`}
-                onClick={isProbe ? () => void runProbe(targets) : undefined}
+                disabled={disabled}
+                aria-disabled={disabled}
+                aria-label={reason ? `${action.label}（${reason}）` : action.label}
+                title={reason ?? action.label}
+                onClick={isProbe ? () => void runProbe(service, targets) : undefined}
               >
-                {action.label}
+                {actionButtonText(action, actionCtx)}
                 {isEnabled(action) ? null : (
                   <span className="pill" style={{ marginLeft: 6 }}>
                     P3
@@ -206,6 +261,18 @@ export function ServiceDetail({ slug }: { slug: string }) {
           })}
         </div>
       </div>
+
+      {probeReason ? (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-table)', marginBottom: 8 }}>
+          「立即探测」不可用：{probeReason}
+        </div>
+      ) : null}
+
+      {notice ? (
+        <div className="card" role="status" style={{ marginBottom: 10, borderColor: 'var(--ok)' }}>
+          <div style={{ padding: '6px 10px', color: 'var(--ok)' }}>✓ {notice.text}</div>
+        </div>
+      ) : null}
 
       {actionError ? (
         <div className="card" style={{ marginBottom: 10, borderColor: 'var(--danger)' }}>
@@ -243,13 +310,13 @@ export function ServiceDetail({ slug }: { slug: string }) {
                   <div className="h">状态计数 · {targets.length} 个 target</div>
                   <div className="kv" style={{ gridTemplateColumns: '96px minmax(0, 1fr)' }}>
                     <span className="k">正常</span>
-                    <span className="v num">{counts.ok}</span>
+                    <span className="v num">{displayCounts.ok}</span>
                     <span className="k">疑似</span>
-                    <span className="v num">{counts.suspect}</span>
+                    <span className="v num">{displayCounts.suspect}</span>
                     <span className="k">故障</span>
-                    <span className="v num">{counts.down}</span>
+                    <span className="v num">{displayCounts.down}</span>
                     <span className="k">无数据</span>
-                    <span className="v num">{counts.unknown}</span>
+                    <span className="v num">{displayCounts.unknown}</span>
                   </div>
                   <div style={{ padding: '0 10px 10px', color: 'var(--muted)' }}>
                     计数按各 target 最近一次检查推导；「故障」以存在未关闭事件为准，

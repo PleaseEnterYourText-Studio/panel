@@ -16,6 +16,13 @@ export function formatClock(at: number | null): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
+/** HH:MM（本地时区）。头部「最近一次成功」用。null → 「—」。 */
+export function formatMinute(at: number | null): string {
+  if (at === null || !Number.isFinite(at)) return '—';
+  const d = new Date(at);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
 /** YYYY-MM-DD HH:MM:SS（本地时区）。给 title / 检查表用。 */
 export function formatDateTime(at: number | null): string {
   if (at === null || !Number.isFinite(at)) return '—';
@@ -28,6 +35,8 @@ export function formatDateTime(at: number | null): string {
 export function formatAgo(at: number | null, now: number): string {
   if (at === null || !Number.isFinite(at)) return '—';
   const diff = now - at;
+  // 负数 = 客户端时钟领先服务端；别显示「刚刚」，那是在替错误数据圆场。
+  if (diff < 0) return '—';
   if (diff < 60_000) return '刚刚';
   const minutes = Math.floor(diff / 60_000);
   if (minutes < 60) return `${minutes} 分钟前`;
