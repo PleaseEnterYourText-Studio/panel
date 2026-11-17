@@ -17,6 +17,8 @@
   --ok: #3fb950;
   --warn: #d29922;
   --danger: #f85149;
+  /* 异常行整行底色（故障红在 panel 上的低饱和版本） */
+  --row-danger: #1a0f10;
   /* 主按钮 */
   --primary: #238636;
 
@@ -180,7 +182,8 @@ pre {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--muted);
-  font-size: var(--fs-table);
+  /* 规格 §10.5：区块标题 13px，与表格 11px 拉开层级。 */
+  font-size: var(--fs-section);
   background: var(--panel-2);
   border-radius: var(--radius) var(--radius) 0 0;
 }
@@ -196,7 +199,9 @@ pre {
   font-size: var(--fs-table);
 }
 
-.card > .r:first-child {
+/* 卡片的第一个内容行不要上边框。有 .h 头部时首个 .r 不是 first-child，
+   所以必须用相邻兄弟选择器；原来的 .card > .r:first-child 是死规则（双线来源）。 */
+.card > .h + .r {
   border-top: none;
 }
 

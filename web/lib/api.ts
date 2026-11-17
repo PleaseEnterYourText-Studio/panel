@@ -77,14 +77,39 @@ export interface ServiceDetail {
   recentChecks: ServiceCheck[];
 }
 
+/** 错误信息里保留的响应体片段长度：够定位是 Access 登录页还是 Worker 崩溃，不刷屏。 */
+const BODY_SNIPPET = 200;
+
 export class ApiError extends Error {
   readonly status: number;
+  /** 响应体片段（最多 200 字）；无 body 的 204 / 空响应为 null。 */
+  readonly body: string | null;
 
-  constructor(method: string, path: string, status: number) {
-    super(`${method} ${path} → ${status}`);
+  constructor(method: string, path: string, status: number, body: string | null = null) {
+    super(`${method} ${path} → ${status}${body ? `: ${body}` : ''}`);
     this.name = 'ApiError';
     this.status = status;
+    this.body = body;
   }
+}
+
+/** 读文本片段；读失败也返回 null，错误路径上不能再抛第二个错。 */
+async function snippet(res: Response): Promise<string | null> {
+  try {
+    const text = await res.text();
+    const trimmed = text.trim();
+    return trimmed === '' ? null : trimmed.slice(0, BODY_SNIPPET);
+  } catch {
+    return null;
+  }
+}
+
+function isJsonContentType(res: Response): boolean {
+  // 注意：先看 content-type，不能直接 res.json()。Cloudflare Access 未登录时
+  // 返回 text/html 的登录页，裸 res.json() 会抛 SyntaxError，调用方就拿不到
+  // status，错误态只能显示 "Unexpected token '<'"。
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+  return contentType.includes('application/json');
 }
 
 function apiPath(path: string): string {
@@ -103,7 +128,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
-  if (!res.ok) throw new ApiError(method, url, res.status);
+  // 204 / 空 body：没有可解析的内容，调用方按 undefined 处理。
+  if (res.status === 204) return undefined as T;
+
+  if (!res.ok) throw new ApiError(method, url, res.status, await snippet(res));
+
+  if (!isJsonContentType(res)) {
+    // 2xx 但不是 JSON：多半是被 Access 拦下或 SPA fallback 返回了 index.html。
+    // 抛 ApiError 而不是 SyntaxError，页面才能显示 status。
+    throw new ApiError(method, url, res.status, await snippet(res));
+  }
+
   return (await res.json()) as T;
 }
 
