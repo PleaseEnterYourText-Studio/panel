@@ -137,6 +137,12 @@ Path 填 `api/health`**（注意不带开头的 `/`）。P0 的 `/api/health` �
 这两个值不是秘密（会随 Worker 下发，代码里也要用它验签），可以写在 `vars`。
 `ENCRYPTION_KEY` 不行，它走 secret（第 9 步）。
 
+> **生产不要设置 `DEV_BYPASS_EMAIL`。** 它是本地开发用的免登录后门：代码里只有同时满足
+> `PANEL_ENV === 'development'` 时才会生效；`PANEL_ENV` 未设置或不是 `development` 时，
+> 这个变量被**完全忽略**，请求照常走 Access JWT 校验。也不要把 `PANEL_ENV` 设成
+> `development` 来「图方便」—— 那等于把后门重新打开（Dashboard 变量、secret、遗留
+> `.dev.vars` 都会生效，且不经过 token 校验）。
+
 ## 8. 二次部署（让 Access 配置生效）
 
 ```bash
@@ -166,7 +172,8 @@ pnpm exec wrangler secret put ENCRYPTION_KEY
 
 secret 写入后立即对该 Worker 生效，**不需要重新部署**。
 
-本地开发不设 secret，用 `.dev.vars`（从 `.dev.vars.example` 复制）。
+本地开发不设 secret，用 `.dev.vars`（从 `.dev.vars.example` 复制）。示例里的
+`PANEL_ENV=development` 只给本地用，生产 Worker 的 `vars` / secret 里不要出现它。
 
 ## 10. 启动自检与首个 owner（**不能漏**）
 
@@ -224,13 +231,50 @@ pnpm exec wrangler d1 execute peyt-panel --remote --command \
 
 角色只有 `owner` / `ops` / `viewer` 三种，写错角色的行会被当作未授权（同样是默认拒绝）。
 
-### 10.3 打开面板确认
+### 10.3 录入第一个监控目标（P0 靠手写 SQL）
+
+P0 没有录入界面，`assets` 与 `targets` 必须手工插。先插 asset（一台/一个服务一行）：
+
+```bash
+pnpm exec wrangler d1 execute peyt-panel --remote --command \
+  "INSERT INTO assets (id, kind, name, slug, grp, owner_email, tags, repo, notes, enabled, created_at)
+   VALUES ('asset-1', 'service', 'NewAPI', 'newapi', 'prod', 'you@example.com', NULL, NULL, NULL, 1,
+           CAST(strftime('%s','now') AS INTEGER) * 1000)"
+```
+
+再插 target（`next_run_at` 用当前毫秒，插完下一分钟就会被 cron 探测到）：
+
+```bash
+pnpm exec wrangler d1 execute peyt-panel --remote --command \
+  "INSERT INTO targets (id, asset_id, source, form, config, interval_sec, timeout_ms, enabled, next_run_at)
+   VALUES ('target-1', 'asset-1', 'http', 'https://api.example.com/health',
+           '{\"expectStatus\":[200]}', 180, 8000, 1,
+           CAST(strftime('%s','now') AS INTEGER) * 1000)"
+```
+
+校验：
+
+```bash
+pnpm exec wrangler d1 execute peyt-panel --remote --command \
+  "SELECT t.id, t.asset_id, t.config, t.next_run_at FROM targets t"
+```
+
+三条硬性约束（写错不会报错，但调度器会跳过，日志里点名 target）：
+
+- `config` **必须是合法 JSON 对象**：少引号、尾逗号都会让整个 target 被跳过
+  （不写 check、不开 incident，`scheduled` 日志里是 `config error for target ...`）。
+- `config.expectStatus` **必须是数组**（如 `[200]` / `[200,204]`）。写成 `"expectStatus": 200`
+  会被判定为配置错误并跳过 —— 这是刻意的防呆：非法配置若被当成默认值探测，
+  会伪装成正常/失败，而不是暴露录入错误。字段整个缺失才按默认 `[200]` 探测。
+- `next_run_at` 必须是 epoch **毫秒**整数，别写成秒。
+
+### 10.4 打开面板确认
 
 浏览器打开 `https://<你的域名>/`：
 
 - 未登录 → 被 Access 挡在登录页（不是 500，也不是空面板）。
-- 登录后 → 概览页显示「全部正常。」或故障摘要；首次部署没有 target 时四张卡都是 0，
-  最近巡检显示「还没有巡检记录」。
+- 登录后 → 概览页显示「全部正常。」或故障摘要；首次部署还没有 target 时四张卡都是 0，
+  主标题显示「尚未配置监控目标。」（空库不等于健康），最近巡检显示「还没有巡检记录」。
 
 ## 11. 关闭 `workers.dev` 路由（别留洞）
 
@@ -247,13 +291,16 @@ Dashboard → Workers & Pages → `peyt-panel` → **Settings → Domains & Rout
 
 - **Cron 每分钟触发一次**（`wrangler.jsonc` 的 `triggers.crons: ["* * * * *"]`）。每次
   tick 只吃一个分片窗口（最多 40 个到期 target），剩下的留给下一分钟。
-- **默认探测间隔 180s**。一个 target 每天约 480 行写入（86400 / 180）。
+- **默认探测间隔 180s**。每次探测实际写 **3 行**：claim 的 `UPDATE targets`、
+  `checks_raw` INSERT、`checks_rollup` upsert。所以一个 180s 的 target 每天约 480 次
+  探测、**约 1,440 行写入**（480 × 3）。
 - **免费版 D1 每天 100,000 行写入预算（自然日，含周末，不是工作日）。**
-- `writeEstimate` 公式：后端按 enabled target 求和后取整，即
-  `floor(Σ 86400 / interval_sec)`（不是每个 target 各自 floor 再相加）。按默认 180s
+- `writeEstimate` 公式：后端只统计「target.enabled=1 且所属 asset.enabled=1」的对象，
+  先求和再取整、最后乘写入系数：
+  `floor(Σ 86400 / interval_sec) * 3`（不是每个 target 各自 floor 再相加）。按默认 180s
   估算：
-  - 顶满 100,000 行 ≈ **208 个** target（208 × 480 = 99,840）；
-  - 概览页的 80,000 预警线在约 **167 个** target 时先到（167 × 480 = 80,160）。
+  - 顶满 100,000 行 ≈ **70 个** target（69 × 1,440 = 99,360；70 个已 100,800 超限）；
+  - 概览页的 80,000 预警线在约 **56 个** target 时先到（55 × 1,440 = 79,200）。
 - 要降写入就调大 `interval_sec`（服务详情页的 target 配置）。概览页**常显**「每日写入
   估算」，超过 80,000 时另外出现黄色预警条。
 - 定时器跑的是 `scheduled` handler；`wrangler dev` 本地默认不触发 cron，需要自测时

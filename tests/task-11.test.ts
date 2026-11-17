@@ -40,6 +40,7 @@ describe('概览主标题', () => {
   it('never calls "no data" healthy', () => {
     expect(overviewHeadline({ okCount: 0, suspectCount: 0, downCount: 0, unknownCount: 4 })).toBe('4 个无数据。');
   });
+
 });
 
 describe('Overview 页契约', () => {
@@ -178,12 +179,31 @@ describe('部署文档', () => {
     expect(deployDoc).not.toContain('每工作日');
   });
 
-  // Minor：公式是 floor(Σ ...)，且换算数字对（180s ≈ 480 行/target，208 顶满、167 预警）。
-  it('states the write estimate as floor of the sum with correct target counts', () => {
-    expect(deployDoc).toContain('floor(Σ 86400 / interval_sec)');
-    expect(deployDoc).toContain('480');
-    expect(deployDoc).toContain('208');
-    expect(deployDoc).toContain('167');
+  // B4：公式必须带写入系数 3，换算按「每次探测写 3 行」重算（180s ≈ 1,440 行/target，
+  // 70 顶满、56 预警）。旧文档按 1 行/probe 算成 480/208/167，会让人以为还很有余量。
+  it('states the write estimate with the 3-row factor and correct target counts', () => {
+    expect(deployDoc).toContain('floor(Σ 86400 / interval_sec) * 3');
+    expect(deployDoc).toContain('1,440');
+    expect(deployDoc).toContain('70 个');
+    expect(deployDoc).toContain('56 个');
+    expect(deployDoc).not.toContain('208 个');
+    expect(deployDoc).not.toContain('167 个');
+  });
+
+  // B1：生产不要设 DEV_BYPASS_EMAIL；PANEL_ENV 不是 development 时它被忽略。
+  it('warns that the dev bypass is production-dangerous and gated by PANEL_ENV', () => {
+    expect(deployDoc).toContain('DEV_BYPASS_EMAIL');
+    expect(deployDoc).toContain('PANEL_ENV');
+    expect(deployDoc).toContain('完全忽略');
+  });
+
+  // S9：P0 手工录 target 的可复制示例 + config 防呆点。
+  it('shows how to insert an asset and a target by hand', () => {
+    expect(deployDoc).toContain('INSERT INTO assets');
+    expect(deployDoc).toContain('INSERT INTO targets');
+    expect(deployDoc).toContain('expectStatus');
+    expect(deployDoc).toContain("CAST(strftime('%s','now') AS INTEGER) * 1000");
+    expect(deployDoc).toContain('必须是合法 JSON');
   });
 });
 
