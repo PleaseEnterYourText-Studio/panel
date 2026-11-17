@@ -1,9 +1,12 @@
 import { Hono } from 'hono';
 import type { Env } from './env';
 import { APP_VERSION } from './env';
+import type { Vars } from './auth/rbac';
 import { runTick } from './scheduler/run';
 
-const app = new Hono<{ Bindings: Env }>();
+// Variables 里带上 identity，后续挂在 /api 下的路由才能直接用 c.get('identity')
+// 拿到 requireRole 中间件写入的身份（Task 7 挂载路由时消费）。
+const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 app.get('/api/health', (c) => c.json({ ok: true, version: APP_VERSION }));
 
